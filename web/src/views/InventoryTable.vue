@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import type { Resource } from "../models/types";
-import { quantity, signed, rate } from "../models/format";
+import { quantity, signed, rate, statisticsLabel } from "../models/format";
 import ResourceIcon from "./ResourceIcon.vue";
 const props = defineProps<{
   rows: Resource[];
+  total: number;
+  start: number;
+  resetScroll: number;
   favorites: string[];
   comparisons: string[];
   selected: string;
@@ -14,53 +17,79 @@ const emit = defineEmits<{
   favorite: [id: string];
   compare: [id: string];
   select: [row: Resource];
+  window: [start: number, count: number];
 }>();
-const scrollTop = ref(0);
+const ROW_HEIGHT = 64;
 const viewport = ref<HTMLElement>();
-const start = computed(() => Math.max(0, Math.floor(scrollTop.value / 64) - 8));
-const visible = computed(() =>
-  props.rows.slice(
-    start.value,
-    start.value + Math.ceil((viewport.value?.clientHeight ?? 800) / 64) + 16,
-  ),
+let observer: ResizeObserver,
+  frame = 0;
+function updateWindow() {
+  cancelAnimationFrame(frame);
+  frame = requestAnimationFrame(() => {
+    const el = viewport.value;
+    if (!el) return;
+    emit(
+      "window",
+      Math.max(0, Math.floor(el.scrollTop / ROW_HEIGHT) - 8),
+      Math.ceil(el.clientHeight / ROW_HEIGHT) + 16,
+    );
+  });
+}
+watch(
+  () => props.resetScroll,
+  () => {
+    if (viewport.value) viewport.value.scrollTop = 0;
+    updateWindow();
+  },
 );
+watch(() => props.total, updateWindow);
+onMounted(() => {
+  observer = new ResizeObserver(updateWindow);
+  observer.observe(viewport.value!);
+  updateWindow();
+});
+onUnmounted(() => {
+  observer?.disconnect();
+  cancelAnimationFrame(frame);
+});
 </script>
 <template>
   <div class="inventory-head" role="row">
     <span></span><span>物品 / 流体</span><span>库存</span
-    ><span title="相邻两次采样的净变化">净变化</span
-    ><span title="相邻两次采样的净变化速率">净速率</span>
+    ><span title="所选范围内最近连续段的净变化">区间净变化</span
+    ><span title="所选范围内最近连续段的平均净速率">平均净速率</span>
   </div>
   <div
     ref="viewport"
     class="inventory-scroll"
     role="grid"
     aria-label="AE 库存"
-    :aria-rowcount="rows.length"
-    @scroll="scrollTop = ($event.target as HTMLElement).scrollTop"
+    :aria-rowcount="total"
+    @scroll.passive="updateWindow"
   >
-    <div :style="{ height: `${rows.length * 64}px`, position: 'relative' }">
+    <div :style="{ height: `${total * ROW_HEIGHT}px`, position: 'relative' }">
       <div
         class="virtual-rows"
-        :style="{ transform: `translateY(${start * 64}px)` }"
+        :style="{ transform: `translateY(${start * ROW_HEIGHT}px)` }"
       >
         <div
-          v-for="row in visible"
+          v-for="row in rows"
           :key="row.id"
           role="row"
           class="inventory-row"
           :class="{ selected: selected === row.id }"
           :aria-selected="selected === row.id"
+          @click="emit('select', row)"
         >
           <button
             class="favorite icon-button"
             :class="{ active: favorites.includes(row.id) }"
             :aria-label="`${favorites.includes(row.id) ? '取消收藏' : '收藏'} ${row.name}`"
-            @click="emit('favorite', row.id)"
+            @click.stop="emit('favorite', row.id)"
           >
             {{ favorites.includes(row.id) ? "★" : "☆" }}
           </button>
-          <button class="resource-name" @click="emit('select', row)">
+          <button class="resource-name" @click.stop="emit('select', row)">
             <ResourceIcon :row="row" /><span
               ><strong>{{ row.name }}</strong
               ><small
@@ -85,16 +114,23 @@ const visible = computed(() =>
           >
           <span
             class="numeric change"
+            :title="statisticsLabel(row)"
             :class="{
               positive: row.delta && BigInt(row.delta) > 0n,
               negative: row.delta && BigInt(row.delta) < 0n,
             }"
-            >{{ signed(row.delta) }}</span
+            >{{ signed(row.delta, row.unit, buckets)
+            }}<small
+              v-if="row.statisticsScope === 'latest-continuous'"
+              class="partial-mark"
+              >*</small
+            ></span
           >
-          <span class="numeric rate-column"
-            >{{ rate(row.rate)
+          <span class="numeric rate-column" :title="statisticsLabel(row)"
+            >{{ rate(row.rate, row.unit, buckets)
             }}<input
               type="checkbox"
+              @click.stop
               :checked="comparisons.includes(row.id)"
               :aria-label="`对比 ${row.name}`"
               @change="emit('compare', row.id)"
@@ -102,7 +138,7 @@ const visible = computed(() =>
         </div>
       </div>
     </div>
-    <div v-if="!rows.length" class="empty">
+    <div v-if="!total" class="empty">
       <strong>没有匹配的资源</strong>
       <p>调整搜索或筛选条件</p>
     </div>

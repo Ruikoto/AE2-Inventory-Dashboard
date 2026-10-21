@@ -121,6 +121,8 @@ public final class DashboardHttp implements AutoCloseable {
                       row.put("lastSeen", n.lastSeen());
                       row.put("createdAt", n.createdAt());
                       row.put("anchors", n.anchors());
+                      row.put("nonZeroResources", service.nonZeroResources(n.id()));
+                      row.put("observedAt", service.observedAt(n.id()));
                       return row;
                     })
                 .toList();
@@ -168,6 +170,36 @@ public final class DashboardHttp implements AutoCloseable {
         }
         switch (parts[5]) {
           case "inventory" -> inventory(exchange, network, query, now);
+          case "statistics" -> {
+            var page =
+                service
+                    .store()
+                    .statistics(
+                        id,
+                        Boolean.parseBoolean(query.getOrDefault("merged", "false")),
+                        number(query, "from", now - 3_600_000),
+                        number(query, "to", now),
+                        integer(query, "offset", 0, 0, 200000),
+                        integer(query, "limit", 2000, 1, 2000),
+                        now);
+            if (query.containsKey("version") && number(query, "version", 0) != page.version()) {
+              error(exchange, 409, "SNAPSHOT_CHANGED");
+            } else
+              json(
+                  exchange,
+                  200,
+                  Map.of(
+                      "worldId",
+                      service.worldId(),
+                      "networkId",
+                      id,
+                      "version",
+                      page.version(),
+                      "total",
+                      page.total(),
+                      "rows",
+                      page.rows()));
+          }
           case "events" ->
               json(
                   exchange,
@@ -197,13 +229,18 @@ public final class DashboardHttp implements AutoCloseable {
                     "networkId",
                     id,
                     "history",
-                    service.store().history(id, ids, from, to, step, now)));
+                    service
+                        .store()
+                        .history(
+                            id, ids, from, to, step, now, number(query, "rateWindowMs", 300_000))));
           }
           default -> error(exchange, 404, "NOT_FOUND");
         }
         return;
       }
       error(exchange, 404, "NOT_FOUND");
+    } catch (History.SnapshotChanged e) {
+      safeError(exchange, 409, "SNAPSHOT_CHANGED");
     } catch (History.InvalidGranularity e) {
       try {
         json(exchange, 400, Map.of("error", "INVALID_PARAMETER", "suggestedStep", e.suggestedStep));
@@ -521,7 +558,8 @@ public final class DashboardHttp implements AutoCloseable {
 
   private void send(HttpExchange exchange, int status, String type, byte[] bytes)
       throws IOException {
-    if (bytes.length > 16 * 1024 * 1024) throw new IOException("Response exceeds budget");
+    int limit = type.equals("image/png") ? 32 * 1024 * 1024 : 16 * 1024 * 1024;
+    if (bytes.length > limit) throw new IOException("Response exceeds budget");
     exchange.getResponseHeaders().set("Content-Type", type);
     exchange.sendResponseHeaders(
         status, exchange.getRequestMethod().equals("HEAD") ? -1 : bytes.length);

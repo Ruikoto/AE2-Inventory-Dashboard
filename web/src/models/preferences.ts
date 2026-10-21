@@ -12,6 +12,9 @@ export interface Preferences {
   sort: "quantity" | "name" | "delta" | "rate";
   buckets: boolean;
   ratio: number;
+  mode: "quantity" | "rate" | "both";
+  rateWindow: number;
+  envelope: boolean;
 }
 export const defaults = (): Preferences => ({
   favorites: [],
@@ -27,13 +30,19 @@ export const defaults = (): Preferences => ({
   sort: "quantity",
   buckets: false,
   ratio: 55,
+  mode: "both",
+  rateWindow: 300000,
+  envelope: false,
 });
 export function preferenceKey(world: string, network: string): string {
   return `ae2dash:1:${location.origin}:${new URL("./", document.baseURI).pathname}:${world}:${network}`;
 }
-export function loadPreferences(key: string): Preferences {
+export function loadPreferences(
+  key: string,
+  sessionValue?: string,
+): Preferences {
   try {
-    const input = JSON.parse(localStorage.getItem(key) ?? "{}");
+    const input = JSON.parse(sessionValue ?? localStorage.getItem(key) ?? "{}");
     const output = defaults();
     for (const field of ["search", "type", "namespace"] as const)
       if (typeof input[field] === "string")
@@ -43,10 +52,15 @@ export function loadPreferences(key: string): Preferences {
       "onlyFavorites",
       "zeros",
       "buckets",
+      "envelope",
     ] as const)
       if (typeof input[field] === "boolean") output[field] = input[field];
     if (["quantity", "name", "delta", "rate"].includes(input.sort))
       output.sort = input.sort;
+    if (["quantity", "rate", "both"].includes(input.mode))
+      output.mode = input.mode;
+    if ([60000, 300000, 900000].includes(input.rateWindow))
+      output.rateWindow = input.rateWindow;
     if (
       Number.isFinite(input.range) &&
       input.range >= 60 &&

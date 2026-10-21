@@ -44,6 +44,24 @@ public final class PerformanceHarness {
         for (int n = 0; n < 10; n++)
           store.append(Snapshot.of("network" + n, "s", now + 20000, 3, changed));
         System.out.println("10x10000_changed_write_ms=" + (System.nanoTime() - changedStart) / 1e6);
+        long statisticsStart = System.nanoTime();
+        int statisticsRows = 0;
+        long version = -1;
+        for (int offset = 0; offset < 10000; offset += 2000) {
+          var page =
+              store.statistics("network0", false, now, now + 20000, offset, 2000, now + 20000);
+          if (version != -1 && version != page.version())
+            throw new AssertionError("Mixed statistics pages");
+          version = page.version();
+          for (var row : page.rows())
+            if (!"79".equals(row.delta()) || !"237".equals(row.rate()))
+              throw new AssertionError("Incorrect interval statistics");
+          statisticsRows += page.rows().size();
+        }
+        if (statisticsRows != 10000) throw new AssertionError("Incomplete statistics catalog");
+        System.out.println(
+            "10000_statistics_rows_ms=" + (System.nanoTime() - statisticsStart) / 1e6);
+
       } else if (mode.equals("dense")) {
         long beginning = now / 10_000 * 10_000 - 11_990_000;
         store.saveNetwork(

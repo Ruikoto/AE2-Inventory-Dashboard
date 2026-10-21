@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 const network = "8b7cc408-99b6-450f-ab76-d895c078f73c";
 const world = "a96a8fc2-3411-43c6-ad89-3b51ff0e298f";
 async function mock(page: import("@playwright/test").Page) {
-  await page.route("**/api/v1/**", async (route) => {
+  await page.context().route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const now = Date.now();
     let json: object;
@@ -74,6 +74,26 @@ async function mock(page: import("@playwright/test").Page) {
         total: rows.length,
         windowMs: 10000,
       };
+    } else if (url.pathname.endsWith("/statistics")) {
+      const from = Number(url.searchParams.get("from")),
+        to = Number(url.searchParams.get("to"));
+      const merged = url.searchParams.get("merged") === "true";
+      json = {
+        worldId: world,
+        version: 1,
+        total: 120,
+        rows: Array.from({ length: 120 }, (_, i) => ({
+          id: merged
+            ? `group:${i % 12 > 8 ? "fluid" : "item"}:${i % 4 ? "minecraft" : "create"}:${i % 12 === 0 ? "iron_ingot" : `resource_${i}`}`
+            : `resource-${i}`,
+          delta: "18000",
+          rate: "300",
+          statisticsScope: "latest-continuous",
+          statisticsFrom: from + 60000,
+          statisticsTo: to,
+          statisticsSamples: 300,
+        })),
+      };
     } else if (url.pathname.endsWith("/history")) {
       const to = Number(url.searchParams.get("to"));
       const from = Number(url.searchParams.get("from"));
@@ -91,7 +111,10 @@ async function mock(page: import("@playwright/test").Page) {
             .filter(Boolean)
             .map((id) => ({
               id,
-              complete: true,
+              complete: false,
+              statisticsScope: "latest-continuous",
+              statisticsFrom: from + 60000,
+              statisticsTo: to,
               delta: "18000",
               rate: "300",
               points: Array.from({ length: 60 }, (_, i) => ({
@@ -106,6 +129,8 @@ async function mock(page: import("@playwright/test").Page) {
                 segment: "one",
                 samples: 6,
                 rate: String(250 + Math.round(Math.cos(i / 4) * 200)),
+                smoothedRate: String(250 + Math.round(Math.cos(i / 4) * 50)),
+                rateWindowMs: 300000,
               })),
             })),
         },
@@ -138,6 +163,8 @@ test("works without client resources, preserves exact quantities and local favor
       .getByRole("row")
       .filter({ has: page.getByRole("button", { name: /铁锭/ }) }),
   ).toHaveCount(1);
+  await expect(page.getByLabel("仅收藏")).toBeChecked();
+  await page.waitForTimeout(250);
   await page.reload();
   await expect(page.getByLabel("仅收藏")).toBeChecked();
   await page.getByRole("button", { name: "设置", exact: true }).click();

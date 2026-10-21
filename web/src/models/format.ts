@@ -12,13 +12,41 @@ export function quantity(
   }
   return `${integer.toLocaleString("zh-CN")}${unit ? ` ${unit}` : ""}`;
 }
-export function signed(value: string | null | undefined): string {
+export function signed(
+  value: string | null | undefined,
+  unit = "",
+  buckets = false,
+): string {
   if (value == null) return "—";
-  return `${BigInt(value) > 0n ? "+" : ""}${quantity(value)}`;
+  return `${BigInt(value) > 0n ? "+" : ""}${quantity(value, unit, buckets)}`;
 }
-export function rate(value: string | null | undefined): string {
+export function rate(
+  value: string | null | undefined,
+  unit = "",
+  buckets = false,
+): string {
   if (value == null) return "—";
-  return `${!value.startsWith("-") && value !== "0" ? "+" : ""}${value}/min`;
+  const negative = value.startsWith("-");
+  const [integer, fraction = ""] = value.replace(/^[+-]/, "").split(".");
+  let text = BigInt(integer).toLocaleString("zh-CN");
+  let decimal = fraction;
+  if (unit === "mB" && buckets) {
+    text = (BigInt(integer) / 1000n).toLocaleString("zh-CN");
+    decimal = (BigInt(integer) % 1000n).toString().padStart(3, "0") + fraction;
+    unit = "B";
+  }
+  decimal = decimal.replace(/0+$/, "");
+  return `${negative ? "−" : BigInt(integer + fraction) !== 0n ? "+" : ""}${text}${decimal ? `.${decimal}` : ""}${unit ? ` ${unit}` : ""}/min`;
+}
+export function statisticsLabel(value: {
+  statisticsScope?: string;
+  statisticsFrom?: number;
+  statisticsTo?: number;
+}): string {
+  if (!value.statisticsScope) return "正在计算所选范围";
+  if (value.statisticsScope === "insufficient")
+    return "连续观测不足，至少需要两个不同时间的样本";
+  return `${value.statisticsScope === "full" ? "统计时段" : "最近连续段"}：${new Date(value.statisticsFrom!).toLocaleString()} — ${new Date(value.statisticsTo!).toLocaleString()}`;
 }
 export const stateNames: Record<string, string> = {
   online: "在线",
@@ -60,16 +88,16 @@ export function duration(seconds: number): string {
         : `${seconds}s`;
 }
 
+export function decimalValue(value: string): bigint {
+  const negative = value.startsWith("-");
+  const [integer, fraction = ""] = value.replace(/^[+-]/, "").split(".");
+  const scaled =
+    BigInt(integer || "0") * 1000000n +
+    BigInt(fraction.padEnd(6, "0").slice(0, 6));
+  return negative ? -scaled : scaled;
+}
 export function decimalOrder(a: string, b: string): number {
-  const scale = (value: string) => {
-    const negative = value.startsWith("-");
-    const [integer, fraction = ""] = value.replace(/^[+-]/, "").split(".");
-    const scaled =
-      BigInt(integer || "0") * 1000000n +
-      BigInt(fraction.padEnd(6, "0").slice(0, 6));
-    return negative ? -scaled : scaled;
-  };
-  const av = scale(a),
-    bv = scale(b);
+  const av = decimalValue(a),
+    bv = decimalValue(b);
   return av < bv ? -1 : av > bv ? 1 : 0;
 }

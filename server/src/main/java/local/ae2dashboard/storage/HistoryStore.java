@@ -6,8 +6,10 @@ import java.math.BigInteger;
 import java.nio.file.*;
 import java.sql.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import local.ae2dashboard.io.BoundedOutputStream;
 import local.ae2dashboard.model.*;
 
@@ -29,6 +31,10 @@ public final class HistoryStore implements AutoCloseable {
   private volatile String status = "recording";
   private volatile long bytes;
   private final String worldId;
+  private final Map<String, Long> statisticsRevisions = new ConcurrentHashMap<>();
+  private final AtomicLong revisionSequence = new AtomicLong(System.currentTimeMillis());
+  private volatile String appendingNetwork;
+  private volatile boolean maintaining;
 
   public HistoryStore(Path directory, long budgetBytes) throws SQLException, IOException {
     this(directory, budgetBytes, 10_000);
@@ -323,6 +329,7 @@ public final class HistoryStore implements AutoCloseable {
     Set<String> keys = new HashSet<>(sample.values().keySet());
     if (continuous) keys.addAll(old.values().keySet());
     budgetInterrupted = false;
+    appendingNetwork = sample.networkId();
     try (var transaction = transaction(true)) {
       update(
           writer,
@@ -370,14 +377,7 @@ public final class HistoryStore implements AutoCloseable {
               segment,
               sample.timestamp(),
               q.toString());
-          aggregate(
-              sample.networkId(),
-              id,
-              segment,
-              sample.timestamp(),
-              q,
-              continuous ? old.timestamp() : sample.timestamp(),
-              prior);
+          aggregate(sample.networkId(), id, segment, sample.timestamp(), q, prior);
         }
       }
       update(
@@ -402,6 +402,9 @@ public final class HistoryStore implements AutoCloseable {
       forget(sample.networkId());
       status = budgetInterrupted ? "paused:space" : "paused:write";
       throw e;
+    } finally {
+      statisticsRevisions.put(sample.networkId(), revisionSequence.incrementAndGet());
+      appendingNetwork = null;
     }
   }
 
@@ -437,13 +440,7 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   private void aggregate(
-      String network,
-      String id,
-      String segment,
-      long t,
-      BigInteger q,
-      long beforeAt,
-      BigInteger before)
+      String network, String id, String segment, long t, BigInteger q, BigInteger before)
       throws SQLException {
     long bucket = t / 60_000 * 60_000;
     long first = t;
@@ -475,6 +472,36 @@ public final class HistoryStore implements AutoCloseable {
     // Rebuild this resource's quarter from committed-in-transaction minute summaries; replay is
     // idempotent.
     long quarter = t / 900_000 * 900_000;
+    long quarterFirst;
+    try (var s =
+            prepare(
+                writer,
+                "SELECT first_at FROM coverage WHERE network=? AND segment=? AND tier=900000 AND"
+                    + " bucket=?",
+                network,
+                segment,
+                quarter);
+        var r = s.executeQuery()) {
+      if (!r.next()) throw new SQLException("Missing quarter coverage");
+      quarterFirst = r.getLong(1);
+    }
+    BigInteger quarterFirstQ = BigInteger.ZERO;
+    long firstMinute = quarterFirst / 60_000 * 60_000;
+    // A sparse quarter may start with unchanged minutes; keep their baseline too.
+    try (var s =
+            prepare(
+                writer,
+                "SELECT t,first_q,last_q FROM rollup_1m WHERE network=? AND resource=? AND"
+                    + " segment=? AND t<=? ORDER BY t DESC LIMIT 1",
+                network,
+                id,
+                segment,
+                firstMinute);
+        var r = s.executeQuery()) {
+      if (r.next())
+        quarterFirstQ =
+            new BigInteger(r.getString(r.getLong(1) == firstMinute ? "first_q" : "last_q"));
+    }
     try (var s =
             prepare(
                 writer,
@@ -486,24 +513,18 @@ public final class HistoryStore implements AutoCloseable {
                 quarter,
                 quarter + 900_000);
         var r = s.executeQuery()) {
-      long fa = 0, la = 0, count = 0;
-      BigInteger fq = null, lq = null, min = null, max = null;
+      long la = 0, count = 0;
+      BigInteger lq = null, min = quarterFirstQ, max = quarterFirstQ;
       while (r.next()) {
         BigInteger a = new BigInteger(r.getString("min_q")),
             b = new BigInteger(r.getString("max_q"));
-        if (fq == null) {
-          fa = r.getLong("first_at");
-          fq = new BigInteger(r.getString("first_q"));
-          min = a;
-          max = b;
-        }
         min = min.min(a);
         max = max.max(b);
         la = r.getLong("last_at");
         lq = new BigInteger(r.getString("last_q"));
         count += r.getLong("samples");
       }
-      if (fq != null) {
+      if (lq != null) {
         update(
             writer,
             "INSERT OR REPLACE INTO rollup_15m VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -511,9 +532,9 @@ public final class HistoryStore implements AutoCloseable {
             id,
             segment,
             quarter,
-            fa,
+            quarterFirst,
             la,
-            fq.toString(),
+            quarterFirstQ.toString(),
             lq.toString(),
             min.toString(),
             max.toString(),
@@ -572,6 +593,20 @@ public final class HistoryStore implements AutoCloseable {
   public History.Result history(
       String network, List<String> ids, long from, long to, long requested, long now)
       throws SQLException, InterruptedException {
+    return history(network, ids, from, to, requested, now, 300_000);
+  }
+
+  public History.Result history(
+      String network,
+      List<String> ids,
+      long from,
+      long to,
+      long requested,
+      long now,
+      long rateWindow)
+      throws SQLException, InterruptedException {
+    if (rateWindow != 60_000 && rateWindow != 300_000 && rateWindow != 900_000)
+      throw new IllegalArgumentException("Invalid rate window");
     if (ids.isEmpty() || ids.size() > 6 || ids.stream().anyMatch(id -> id.length() > 256))
       throw new IllegalArgumentException("Choose 1 to 6 resources");
     long step = History.step(from, to, now, requested);
@@ -582,34 +617,11 @@ public final class HistoryStore implements AutoCloseable {
       c.setAutoCommit(false);
       try {
         long start = Math.max(from, retainedFrom);
-        List<Coverage> coverage = new ArrayList<>();
-        String coverageSql =
-            tier == 10_000
-                ? "SELECT segment,t AS bucket,t AS first_at,t AS last_at,1 AS samples FROM"
-                    + " sample_frames WHERE network=? AND t>=? AND t<=? ORDER BY t LIMIT 260000"
-                : "SELECT * FROM coverage WHERE network=? AND tier=? AND bucket>=? AND bucket<=?"
-                    + " ORDER BY bucket,segment LIMIT 260000";
-        Object[] coverageArgs =
-            tier == 10_000
-                ? new Object[] {network, start, to}
-                : new Object[] {network, tier, start / tier * tier, to};
-        try (var s = prepare(c, coverageSql, coverageArgs);
-            var r = s.executeQuery()) {
-          while (r.next()) {
-            checkInterrupted();
-            coverage.add(
-                new Coverage(
-                    r.getString("segment"),
-                    r.getLong("bucket"),
-                    r.getLong("first_at"),
-                    r.getLong("last_at"),
-                    r.getLong("samples")));
-          }
-        }
+        List<Coverage> coverage = coverage(c, network, start, to, tier);
         List<History.Series> output = new ArrayList<>();
         String table = tier == 10_000 ? "raw_changes" : tier == 60_000 ? "rollup_1m" : "rollup_15m";
         for (String id : ids)
-          output.add(readSeries(c, table, network, id, coverage, start, to, step, tier));
+          output.add(readSeries(c, table, network, id, coverage, from, to, step, tier, rateWindow));
         long available = coverage.isEmpty() ? to : coverage.get(0).first();
         var result =
             new History.Result(
@@ -633,7 +645,153 @@ public final class HistoryStore implements AutoCloseable {
     }
   }
 
+  private List<Coverage> coverage(Connection c, String network, long start, long to, long tier)
+      throws SQLException {
+    List<Coverage> coverage = new ArrayList<>();
+    String coverageSql =
+        tier == 10_000
+            ? "SELECT segment,t AS bucket,t AS first_at,t AS last_at,1 AS samples FROM"
+                + " sample_frames WHERE network=? AND t>=? AND t<=? ORDER BY t LIMIT 260000"
+            : "SELECT * FROM coverage WHERE network=? AND tier=? AND bucket>=? AND bucket<=?"
+                + " ORDER BY bucket,segment LIMIT 260000";
+    Object[] coverageArgs =
+        tier == 10_000
+            ? new Object[] {network, start, to}
+            : new Object[] {network, tier, start / tier * tier, to};
+    try (var s = prepare(c, coverageSql, coverageArgs);
+        var r = s.executeQuery()) {
+      while (r.next()) {
+        checkInterrupted();
+        coverage.add(
+            new Coverage(
+                r.getString("segment"),
+                r.getLong("bucket"),
+                r.getLong("first_at"),
+                r.getLong("last_at"),
+                r.getLong("samples")));
+      }
+    }
+    coverage.removeIf(cv -> cv.first() < start || cv.last() > to);
+    return coverage;
+  }
+
   private record Coverage(String segment, long bucket, long first, long last, long samples) {}
+
+  public History.StatisticsPage statistics(
+      String network, boolean grouped, long from, long to, int offset, int limit, long now)
+      throws SQLException, InterruptedException {
+    History.step(from, to, now, 0);
+    if (offset < 0 || limit < 1 || limit > 2000) throw new IllegalArgumentException("Invalid page");
+    long tier = now - from > 7 * History.DAY ? 900_000 : now - from > History.DAY ? 60_000 : 10_000;
+    try (var lease = reader();
+        var c = lease.connection();
+        var operation = lease.operation()) {
+      c.setAutoCommit(false);
+      try {
+        long version =
+            statisticsRevisions.computeIfAbsent(
+                network, ignored -> revisionSequence.incrementAndGet());
+        if (maintaining || network.equals(appendingNetwork)) throw new History.SnapshotChanged();
+        List<Coverage> observations = coverage(c, network, Math.max(from, retainedFrom), to, tier);
+        Coverage first = null, last = null;
+        long count = 0;
+        boolean oneSegment = true;
+        for (Coverage cv : observations) {
+          if (last == null
+              || !last.segment().equals(cv.segment())
+              || cv.first() - last.last() > Math.max(maximumGap, tier + 20_000)) {
+            if (last != null) oneSegment = false;
+            first = cv;
+            count = 0;
+          }
+          last = cv;
+          count += cv.samples();
+        }
+        boolean sufficient = first != null && last.last() > first.first() && count > 1;
+        boolean complete =
+            sufficient
+                && oneSegment
+                && first.first() <= from + Math.max(tier, 10_000)
+                && last.last() >= to - Math.max(tier, 30_000);
+        int total;
+        String catalog = " FROM series WHERE network=? AND (resource LIKE 'group:%')=?";
+        try (var s = prepare(c, "SELECT COUNT(*)" + catalog, network, grouped ? 1 : 0);
+            var r = s.executeQuery()) {
+          total = r.next() ? r.getInt(1) : 0;
+        }
+        String table = tier == 10_000 ? "raw_changes" : tier == 60_000 ? "rollup_1m" : "rollup_15m";
+        String beginning =
+            tier == 10_000 ? "q" : "CASE WHEN v.t=b.bucket THEN first_q ELSE last_q END";
+        String ending = tier == 10_000 ? "q" : "last_q";
+        String lookup =
+            " FROM "
+                + table
+                + " v WHERE v.network=b.network AND v.segment=b.segment AND v.resource=r.resource"
+                + " AND v.t<=%s ORDER BY v.t DESC LIMIT 1";
+        List<History.Statistics> output = new ArrayList<>();
+        try (var s =
+                prepare(
+                    c,
+                    "WITH bounds AS (SELECT ? AS network,? AS segment,? AS first,? AS last,? AS"
+                        + " bucket), catalog AS (SELECT resource"
+                        + catalog
+                        + " ORDER BY resource LIMIT ? OFFSET ?)"
+                        + " SELECT r.resource,COALESCE((SELECT "
+                        + beginning
+                        + lookup.formatted("b.first")
+                        + "),'0'),"
+                        + " COALESCE((SELECT "
+                        + ending
+                        + lookup.formatted("b.last")
+                        + "),'0') FROM catalog r CROSS JOIN bounds b",
+                    network,
+                    first == null ? "" : first.segment(),
+                    first == null ? 0 : first.first(),
+                    last == null ? 0 : last.last(),
+                    first == null ? 0 : first.bucket(),
+                    network,
+                    grouped ? 1 : 0,
+                    limit,
+                    offset);
+            var r = s.executeQuery()) {
+          while (r.next()) {
+            checkInterrupted();
+            String delta =
+                sufficient
+                    ? new BigInteger(r.getString(3))
+                        .subtract(new BigInteger(r.getString(2)))
+                        .toString()
+                    : null;
+            output.add(
+                new History.Statistics(
+                    r.getString(1),
+                    delta,
+                    delta == null
+                        ? null
+                        : History.rate(new BigInteger(delta), last.last() - first.first()),
+                    complete,
+                    first == null ? 0 : first.first(),
+                    last == null ? 0 : last.last(),
+                    count,
+                    !sufficient ? "insufficient" : complete ? "full" : "latest-continuous"));
+          }
+        }
+        c.commit();
+        if (maintaining
+            || network.equals(appendingNetwork)
+            || statisticsRevisions.get(network) != version) throw new History.SnapshotChanged();
+        return new History.StatisticsPage(version, total, output);
+      } catch (SQLException | RuntimeException e) {
+        operation.close();
+        try {
+          c.rollback();
+        } catch (SQLException rollback) {
+          e.addSuppressed(rollback);
+        }
+        throw e;
+      }
+    }
+  }
 
   private record Change(
       long t,
@@ -653,7 +811,8 @@ public final class HistoryStore implements AutoCloseable {
       long from,
       long to,
       long step,
-      long tier)
+      long tier,
+      long rateWindow)
       throws SQLException {
     try (var s = prepare(c, "SELECT 1 FROM series WHERE network=? AND resource=?", network, id);
         var r = s.executeQuery()) {
@@ -739,7 +898,7 @@ public final class HistoryStore implements AutoCloseable {
       }
       cursors.put(cv.segment(), index);
       values.put(cv.segment(), q);
-      long bucket = cv.bucket() / step * step;
+      long bucket = cv.bucket();
       boolean hole =
           lastCoverage != Long.MIN_VALUE
               && cv.first() - lastCoverage > Math.max(maximumGap, tier + 20_000);
@@ -768,45 +927,7 @@ public final class HistoryStore implements AutoCloseable {
     }
     if (first != null)
       points.add(point(currentBucket, currentSegment, fa, la, samples, first, last, min, max));
-    if (points.size() > 1200)
-      throw new IllegalArgumentException("Too many continuous segments; narrow the history range");
-    List<History.Point> withRate = new ArrayList<>();
-    History.Point previous = null;
-    for (History.Point p : points) {
-      String rate =
-          previous != null && previous.segment().equals(p.segment())
-              ? History.rate(
-                  new BigInteger(p.quantity()).subtract(new BigInteger(previous.quantity())),
-                  p.lastAt() - previous.lastAt())
-              : null;
-      withRate.add(
-          new History.Point(
-              p.timestamp(),
-              p.segment(),
-              p.quantity(),
-              p.firstQuantity(),
-              p.min(),
-              p.max(),
-              p.firstAt(),
-              p.lastAt(),
-              p.samples(),
-              rate));
-      previous = p;
-    }
-    boolean complete =
-        !points.isEmpty()
-            && points.stream().mapToLong(History.Point::samples).sum() > 1
-            && points.get(0).firstAt() <= from + Math.max(tier, 10_000)
-            && points.get(points.size() - 1).lastAt() >= to - Math.max(tier, 30_000)
-            && points.stream().map(History.Point::segment).distinct().count() == 1;
-    String delta = null, rate = null;
-    if (complete) {
-      var a = points.get(0);
-      var b = points.get(points.size() - 1);
-      delta = new BigInteger(b.quantity()).subtract(new BigInteger(a.firstQuantity())).toString();
-      rate = History.rate(new BigInteger(delta), b.lastAt() - a.firstAt());
-    }
-    return new History.Series(id, withRate, delta, rate, complete);
+    return History.summarize(id, points, from, to, step, tier, rateWindow);
   }
 
   private static Change change(ResultSet r) throws SQLException {
@@ -884,6 +1005,28 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   public record StoredInventory(long timestamp, List<Resource.Stored> rows, int total) {}
+
+  public record Observation(long timestamp, long nonZeroResources) {}
+
+  public Observation lastObservation(String network) throws SQLException {
+    try (var lease = reader();
+        var c = lease.connection();
+        var operation = lease.operation();
+        var s =
+            prepare(
+                c,
+                "WITH latest AS (SELECT segment,last_at FROM coverage WHERE network=? AND"
+                    + " tier=900000 ORDER BY last_at DESC LIMIT 1) SELECT last_at,(SELECT COUNT(*)"
+                    + " FROM series s WHERE s.network=? AND s.resource NOT LIKE 'group:%' AND"
+                    + " COALESCE((SELECT last_q FROM rollup_15m v WHERE v.network=s.network AND"
+                    + " v.resource=s.resource AND v.segment=latest.segment ORDER BY t DESC LIMIT"
+                    + " 1),'0')<>'0') FROM latest",
+                network,
+                network);
+        var r = s.executeQuery()) {
+      return r.next() ? new Observation(r.getLong(1), r.getLong(2)) : new Observation(0, 0);
+    }
+  }
 
   public StoredInventory lastInventory(
       String network, boolean grouped, String group, int offset, int limit) throws SQLException {
@@ -1039,6 +1182,7 @@ public final class HistoryStore implements AutoCloseable {
     if (now - lastMaintenance < 60_000) return;
     lastMaintenance = now;
     ensureWriter();
+    maintaining = true;
     try (var operation = watchdog.watch(writer, 0, null)) {
       if (now - lastActivityRefresh >= 3_600_000) {
         try (var touch =
@@ -1143,6 +1287,9 @@ public final class HistoryStore implements AutoCloseable {
         e.addSuppressed(close);
       }
       throw e;
+    } finally {
+      statisticsRevisions.replaceAll((network, revision) -> revisionSequence.incrementAndGet());
+      maintaining = false;
     }
   }
 

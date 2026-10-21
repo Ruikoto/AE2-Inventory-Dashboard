@@ -15,7 +15,10 @@ export async function request<T>(
     new URL(`api/v1/${path}`, new URL("./", document.baseURI)),
     {
       credentials: "same-origin",
-      signal,
+      signal: AbortSignal.any([
+        ...(signal ? [signal] : []),
+        AbortSignal.timeout(15000),
+      ]),
       ...init,
     },
   );

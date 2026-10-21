@@ -10,7 +10,10 @@ import {
   quantity,
   signed,
   rate,
+  statisticsLabel,
 } from "../models/format";
+import ThemePicker from "./ThemePicker.vue";
+import BrandMark from "./BrandMark.vue";
 import InventoryTable from "./InventoryTable.vue";
 import TrendChart from "./TrendChart.vue";
 const vm = useDashboard();
@@ -20,6 +23,12 @@ const {
   networkId,
   currentNetwork,
   visibleRows,
+  totalRows,
+  windowStart,
+  resetScroll,
+  showEmptyNetworks,
+  hiddenNetworks,
+  statisticsReady,
   namespaces,
   history,
   events,
@@ -43,12 +52,38 @@ const units = computed(() => [
   ...new Set(selectedRows.value.map((row) => row.unit)),
 ]);
 const chosen = computed(() => selectedRows.value[0]);
+const chosenSeries = computed(() =>
+  history.value?.series.find((s) => s.id === chosen.value?.id),
+);
+const hasEnvelope = computed(
+  () =>
+    history.value?.series.some((s) => s.points.some((p) => p.min !== p.max)) ??
+    false,
+);
+const actualRateWindow = computed(() =>
+  Math.max(
+    preferences.rateWindow,
+    ...(history.value?.series ?? []).flatMap((s) =>
+      s.points.map((p) => p.rateWindowMs ?? 0),
+    ),
+  ),
+);
+const chartGroups = computed(() =>
+  units.value.map((unit) => ({
+    unit,
+    rows: selectedRows.value.filter((r) => r.unit === unit),
+  })),
+);
 </script>
 <template>
-  <main v-if="!status" class="loading">正在连接监测服务…</main>
+  <main v-if="!status" class="loading">
+    <p>{{ error || "正在连接监测服务…" }}</p>
+    <button v-if="error" @click="vm.refresh">重新连接</button>
+  </main>
   <main v-else-if="!status.authenticated" class="login-shell">
+    <div class="login-theme"><ThemePicker /></div>
     <form class="login" @submit.prevent="vm.login">
-      <span class="brand-mark">▤</span>
+      <BrandMark />
       <h1>AE 库存监测</h1>
       <label for="password">访问密码</label
       ><input
@@ -70,9 +105,7 @@ const chosen = computed(() => selectedRows.value[0]);
     :style="{ '--table-ratio': `${preferences.ratio}%` }"
   >
     <header class="app-header">
-      <div class="brand">
-        <span class="brand-mark">▤</span><span>AE 库存监测</span>
-      </div>
+      <div class="brand"><BrandMark /><span>AE 库存监测</span></div>
       <div class="network-picker">
         <label for="network">网络</label
         ><select id="network" v-model="networkId">
@@ -95,6 +128,7 @@ const chosen = computed(() => selectedRows.value[0]);
           >{{ new Date(inventory.timestamp).toLocaleTimeString() }}</time
         >
       </div>
+      <ThemePicker />
       <button class="subtle" :disabled="busy" @click="vm.refresh">
         {{ busy ? "读取中" : "刷新" }}</button
       ><button class="subtle" @click="settings = !settings">设置</button>
@@ -111,6 +145,9 @@ const chosen = computed(() => selectedRows.value[0]);
       }}。当前库存继续更新。
     </div>
     <section v-if="settings" class="settings-panel" aria-label="本地设置">
+      <label class="check"
+        ><input v-model="showEmptyNetworks" type="checkbox" />显示空网络</label
+      >
       <label
         >网络别名<input
           :value="aliases[networkId] ?? ''"
@@ -151,7 +188,17 @@ const chosen = computed(() => selectedRows.value[0]);
     </section>
     <section class="filter-bar" aria-label="库存筛选">
       <div class="search">
-        <span aria-hidden="true">⌕</span
+        <svg
+          aria-hidden="true"
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+        >
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <path d="m16 16 5 5" /></svg
         ><input
           v-model="preferences.search"
           aria-label="搜索物品"
@@ -178,9 +225,7 @@ const chosen = computed(() => selectedRows.value[0]);
         <option value="name">名称</option>
         <option value="delta">净变化降序</option>
         <option value="rate">净速率降序</option></select
-      ><span class="resource-count"
-        >{{ visibleRows.length.toLocaleString() }} 项</span
-      >
+      ><span class="resource-count">{{ totalRows.toLocaleString() }} 项</span>
     </section>
     <section class="time-bar">
       <label
@@ -221,7 +266,20 @@ const chosen = computed(() => selectedRows.value[0]);
         >实际 {{ duration(history.step / 1000)
         }}<template v-if="history.truncated"> · 部分历史不可用</template></span
       >
+      <label v-if="mode !== 'quantity'"
+        >速率平滑<select
+          v-model.number="preferences.rateWindow"
+          aria-label="速率平滑窗口"
+        >
+          <option :value="60000">1m</option>
+          <option :value="300000">5m</option>
+          <option :value="900000">15m</option>
+        </select></label
+      >
       <div class="mode-switch">
+        <button :class="{ active: mode === 'both' }" @click="mode = 'both'">
+          数量＋速率
+        </button>
         <button
           :class="{ active: mode === 'quantity' }"
           @click="mode = 'quantity'"
@@ -235,12 +293,27 @@ const chosen = computed(() => selectedRows.value[0]);
     <div class="panels">
       <section class="inventory-panel">
         <div v-if="!networks.length" class="empty">
-          <strong>尚未发现 AE 网络</strong>
-          <p>加载包含 ME 控制器的网络后自动开始记录</p>
+          <strong>{{
+            hiddenNetworks ? "暂无非空网络" : "尚未发现 AE 网络"
+          }}</strong>
+          <p>
+            {{
+              hiddenNetworks
+                ? `已隐藏 ${hiddenNetworks} 个空网络`
+                : "加载包含 ME 控制器的网络后自动开始记录"
+            }}
+          </p>
+          <button v-if="hiddenNetworks" @click="showEmptyNetworks = true">
+            显示空网络
+          </button>
         </div>
         <InventoryTable
           v-else
           :rows="visibleRows"
+          :total="totalRows"
+          :start="windowStart"
+          :reset-scroll="resetScroll"
+          @window="vm.setWindow"
           :favorites="preferences.favorites"
           :comparisons="preferences.comparisons"
           :selected="selected"
@@ -271,8 +344,20 @@ const chosen = computed(() => selectedRows.value[0]);
                 }}
               </p>
             </div>
-            <label class="check"
-              ><input v-model="envelope" type="checkbox" />波动范围</label
+            <label
+              class="check"
+              :title="
+                mode === 'rate'
+                  ? '波动范围仅适用于数量'
+                  : !hasEnvelope
+                    ? '当前粒度下无额外波动范围'
+                    : '显示每个统计桶内的最低与最高库存'
+              "
+              ><input
+                v-model="envelope"
+                type="checkbox"
+                :disabled="mode === 'rate' || !hasEnvelope"
+              />波动范围</label
             >
           </div>
           <div v-if="selectedRows.length === 1" class="resource-stats">
@@ -284,26 +369,39 @@ const chosen = computed(() => selectedRows.value[0]);
             </div>
             <div>
               <span>区间净变化</span
-              ><strong>{{ signed(history?.series[0]?.delta) }}</strong>
+              ><strong>{{
+                signed(chosenSeries?.delta, chosen.unit, preferences.buckets)
+              }}</strong>
             </div>
             <div>
-              <span>区间净速率</span
-              ><strong>{{ rate(history?.series[0]?.rate) }}</strong>
+              <span>平均净速率</span
+              ><strong>{{
+                rate(chosenSeries?.rate, chosen.unit, preferences.buckets)
+              }}</strong>
             </div>
           </div>
           <p
             v-if="history && history.series.some((s) => !s.complete)"
             class="coverage-note"
           >
-            区间包含缺口或观测不足，完整区间统计暂不可用
+            {{ chosenSeries ? statisticsLabel(chosenSeries) : "等待历史统计" }}
+          </p>
+          <p
+            v-if="
+              mode !== 'quantity' && actualRateWindow > preferences.rateWindow
+            "
+            class="coverage-note"
+          >
+            历史精度限制：实际平滑窗口 {{ duration(actualRateWindow / 1000) }}
           </p>
           <template v-if="history?.series.some((s) => s.points.length)"
             ><TrendChart
-              v-for="unit in units"
-              :key="unit"
+              v-for="group in chartGroups"
+              :key="group.unit"
               :history="history"
-              :rows="selectedRows.filter((r) => r.unit === unit)"
-              :unit="unit"
+              :rows="group.rows"
+              :unit="group.unit"
+              :buckets="preferences.buckets"
               :mode="mode"
               :envelope="envelope"
           /></template>
@@ -370,7 +468,14 @@ const chosen = computed(() => selectedRows.value[0]);
     </div>
     <footer>
       <span>{{ currentNetwork?.label ?? "等待网络" }}</span
-      ><span>净变化来自库存采样 · 表格显示相邻采样变化</span><span>只读</span>
+      ><span>{{
+        statisticsReady
+          ? "净变化按所选范围计算 · * 最近连续段"
+          : error
+            ? "区间统计暂不可用"
+            : "正在计算所选范围的统计…"
+      }}</span
+      ><span>只读</span>
     </footer>
   </main>
 </template>

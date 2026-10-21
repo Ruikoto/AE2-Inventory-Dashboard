@@ -73,6 +73,8 @@ tasks.register('buildWeb', Exec) {
     workingDir rootProject.file('web')
     commandLine npm, 'run', 'build'
     inputs.dir(rootProject.file('web/src'))
+    inputs.dir(rootProject.file('web/public'))
+    inputs.files(rootProject.file('web/index.html'), rootProject.file('web/package.json'))
     inputs.files(rootProject.file('web/package-lock.json'), rootProject.file('web/vite.config.ts'))
     outputs.dir(rootProject.file('web/dist'))
 }

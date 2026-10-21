@@ -18,6 +18,10 @@ export interface Resource {
   rate: string | null;
   variantCount: number;
   icon?: Icon;
+  statisticsFrom?: number;
+  statisticsTo?: number;
+  statisticsSamples?: number;
+  statisticsScope?: "full" | "latest-continuous" | "insufficient";
 }
 export interface Network {
   id: string;
@@ -25,6 +29,8 @@ export interface Network {
   status: string;
   lastSeen: number;
   anchors: string[];
+  nonZeroResources?: number | null;
+  observedAt?: number | null;
 }
 export interface Status {
   authenticated: boolean;
@@ -59,6 +65,8 @@ export interface Point {
   lastAt: number;
   samples: number;
   rate?: string | null;
+  smoothedRate?: string | null;
+  rateWindowMs?: number;
 }
 export interface Series {
   id: string;
@@ -66,6 +74,10 @@ export interface Series {
   delta?: string;
   rate?: string;
   complete: boolean;
+  statisticsFrom?: number;
+  statisticsTo?: number;
+  statisticsSamples?: number;
+  statisticsScope?: "full" | "latest-continuous" | "insufficient";
 }
 export interface History {
   from: number;

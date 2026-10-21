@@ -48,4 +48,37 @@ class ModelTest {
     assertTrue(History.step(now - 30 * History.DAY, now, now, 0) >= 900_000);
     assertEquals("120", History.rate(BigInteger.valueOf(20), 10_000));
   }
+
+  @Test
+  void displayedRateRetainsAdjacentPointSemanticsWhileSmoothingUsesRawObservations() {
+    List<History.Point> points = new ArrayList<>();
+    long[] times = {0, 10000, 20000, 60000, 70000};
+    String[] quantities = {"0", "50", "0", "100", "50"};
+    for (int i = 0; i < times.length; i++)
+      points.add(
+          new History.Point(
+              times[i],
+              "s",
+              quantities[i],
+              quantities[i],
+              quantities[i],
+              quantities[i],
+              times[i],
+              times[i],
+              1,
+              null));
+    var fine = History.summarize("r", points, 0, 70000, 10000, 10000, 300000);
+    var coarse = History.summarize("r", points, 0, 70000, 60000, 10000, 300000);
+    assertEquals(2, coarse.points().size());
+    assertNull(coarse.points().get(0).rate());
+    assertEquals("60", coarse.points().get(1).rate());
+    assertEquals("42.857143", coarse.points().get(1).smoothedRate());
+    assertEquals(fine.points().get(4).smoothedRate(), coarse.points().get(1).smoothedRate());
+    assertEquals(fine.delta(), coarse.delta());
+    points.add(new History.Point(80000, "next", "200", "200", "200", "200", 80000, 80000, 1, null));
+    var resumed = History.summarize("r", points, 0, 80000, 60000, 10000, 300000);
+    assertNull(resumed.delta());
+    assertNull(resumed.points().get(2).rate());
+    assertNull(resumed.points().get(2).smoothedRate());
+  }
 }

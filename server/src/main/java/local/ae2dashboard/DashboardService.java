@@ -42,6 +42,10 @@ public final class DashboardService implements AutoCloseable {
   public record Current(Snapshot snapshot, Snapshot before) {}
 
   private final ConcurrentHashMap<String, Current> current = new ConcurrentHashMap<>();
+
+  private record Observation(long timestamp, long nonZeroResources) {}
+
+  private final ConcurrentHashMap<String, Observation> observations = new ConcurrentHashMap<>();
   private final Set<String> broken = ConcurrentHashMap.newKeySet();
   private final AtomicLong dropped = new AtomicLong();
   private final AtomicLong snapshotBytes = new AtomicLong(), cacheEvictions = new AtomicLong();
@@ -57,6 +61,22 @@ public final class DashboardService implements AutoCloseable {
             config.sampleIntervalSeconds() * 1000L);
     for (Network n : store.networks()) networks.put(n.id(), n);
     assets = AssetPack.load(config.assetPack());
+    // 后台恢复显示信息；只排一个任务，避免把历史网络数误算为丢样。
+    writer.execute(
+        () -> {
+          for (Network network : networks.values()) {
+            if (closing) break;
+            try {
+              var observation = store.lastObservation(network.id());
+              if (observation.timestamp() > 0)
+                observations.putIfAbsent(
+                    network.id(),
+                    new Observation(observation.timestamp(), observation.nonZeroResources()));
+            } catch (Exception e) {
+              LOG.warn("Cannot restore network display metadata", e);
+            }
+          }
+        });
   }
 
   public HistoryStore store() {
@@ -83,6 +103,16 @@ public final class DashboardService implements AutoCloseable {
 
   public Current current(String id) {
     return current.get(id);
+  }
+
+  public Long nonZeroResources(String id) {
+    var observed = observations.get(id);
+    return observed == null ? null : observed.nonZeroResources();
+  }
+
+  public Long observedAt(String id) {
+    var observed = observations.get(id);
+    return observed == null ? null : observed.timestamp();
   }
 
   public String worldId() {
@@ -133,6 +163,13 @@ public final class DashboardService implements AutoCloseable {
   }
 
   public void sample(Snapshot snapshot) {
+    observations.put(
+        snapshot.networkId(),
+        new Observation(
+            snapshot.timestamp(),
+            snapshot.values().values().stream()
+                .filter(v -> !v.resource().id().startsWith("group:") && v.quantity().signum() > 0)
+                .count()));
     current.compute(
         snapshot.networkId(),
         (id, old) -> {
