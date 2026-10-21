@@ -1,0 +1,25 @@
+{
+  "sourceRepository": "https://github.com/Ruikoto/AE2-Web-Integration",
+  "sourceCommit": "b41f8a054387b332898b18855111067aa5a4120a",
+  "license": "LGPL-3.0-or-later",
+  "identityContract": "ae2wi-1.2.0-pre-forge-1.20.1",
+  "releasedJarSha256": "50b7157d6db3081359fa8fa3d482ecaca5dd10fbe155197bbe5a1863f8dcebc5",
+  "files": [
+    {
+      "file": "ClientCommands.java",
+      "sha256": "337deb181cfa86b95d2a235096fcb32cf20400bab38d09ecae5a63cfc646a2e3"
+    },
+    {
+      "file": "identity/StableKey.java",
+      "sha256": "5854e1e2fa545c85de3b4ff0bdbcd90c703875ae643ac9c5e02389909354dfdf"
+    },
+    {
+      "file": "identity/CanonicalNbt.java",
+      "sha256": "ae0f90d5c7d3e21c85b1b3fbc5dff5c9b189c710eecc07df0ce02ae658442a5d"
+    },
+    {
+      "file": "identity/NativeItemIdentity.java",
+      "sha256": "bea0a4cfe59cd6d42cea5a5138ed4b6da7ebf57f6075d24e34ac0bee6d3fd0a9"
+    }
+  ]
+}

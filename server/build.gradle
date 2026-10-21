@@ -1,0 +1,85 @@
+apply from: rootProject.file('gradle/forge-module.gradle')
+legacyForge {
+    runs { server { server(); programArguments.add '--nogui' } }
+    mods { ae2dashboard { sourceSet sourceSets.main; sourceSet project(':contracts').sourceSets.main } }
+}
+configurations { bundled }
+dependencies {
+    implementation 'org.xerial:sqlite-jdbc:3.50.3.0'
+    bundled('org.xerial:sqlite-jdbc:3.50.3.0') { transitive = false }
+    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.1'
+    if (providers.gradleProperty('guideMeJar').isPresent()) {
+        modLocalRuntime files(providers.gradleProperty('guideMeJar').get())
+    }
+}
+tasks.named('runServer') {
+    doFirst {
+        if (!providers.gradleProperty('guideMeJar').isPresent()) throw new GradleException('AE2 needs GuideME: supply -PguideMeJar=<absolute-path-to-guideme-20.1.14.jar> outside the run/mods directory for automatic development remapping.')
+    }
+}
+sourceSets {
+    core { java { srcDir 'src/main/java'; exclude 'local/ae2dashboard/forge/**' } }
+    coreTest { java.srcDir 'src/test/java'; compileClasspath += sourceSets.core.output; runtimeClasspath += sourceSets.core.output }
+    nativeTest { java.srcDir 'src/nativeTest/java'; compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath; runtimeClasspath += sourceSets.main.output + sourceSets.main.compileClasspath }
+}
+dependencies {
+    coreImplementation project(':contracts')
+    coreImplementation 'org.xerial:sqlite-jdbc:3.50.3.0'
+    coreImplementation 'org.slf4j:slf4j-api:1.7.36'
+    coreTestImplementation project(':contracts')
+    coreTestImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
+    coreTestImplementation 'org.xerial:sqlite-jdbc:3.50.3.0'
+    coreTestRuntimeOnly 'org.slf4j:slf4j-simple:1.7.36'
+    coreTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    nativeTestImplementation 'org.junit.jupiter:junit-jupiter:5.10.3'
+    nativeTestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+tasks.register('coreTest', Test) {
+    testClassesDirs = sourceSets.coreTest.output.classesDirs
+    classpath = sourceSets.coreTest.runtimeClasspath
+    useJUnitPlatform()
+}
+tasks.named('check') { dependsOn 'coreTest' }
+tasks.register('nativeTest', Test) {
+    testClassesDirs = sourceSets.nativeTest.output.classesDirs
+    classpath = sourceSets.nativeTest.runtimeClasspath
+    useJUnitPlatform()
+}
+tasks.named('check') { dependsOn 'nativeTest' }
+tasks.named('processCoreResources') {
+    dependsOn 'buildWeb'
+    from(rootProject.file('web/dist')) { into 'web' }
+}
+tasks.register('runDemo', JavaExec) {
+    dependsOn 'coreTestClasses'
+    classpath = sourceSets.coreTest.runtimeClasspath
+    mainClass = 'local.ae2dashboard.LocalHarness'
+    workingDir rootProject.projectDir
+}
+tasks.register('performanceTest', JavaExec) {
+    dependsOn 'coreTestClasses'
+    classpath = sourceSets.coreTest.runtimeClasspath
+    mainClass = 'local.ae2dashboard.PerformanceHarness'
+    workingDir rootProject.projectDir
+    args providers.gradleProperty('workload').getOrElse('large')
+    maxHeapSize = '1g'
+}
+tasks.named('jar') {
+    from({ configurations.bundled.collect { zipTree(it) } }) {
+        exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA', 'META-INF/versions/**', 'module-info.class'
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+tasks.named('reobfJar') { archiveClassifier = 'server' }
+def npm = System.getProperty('os.name').toLowerCase().contains('windows') ? 'npm.cmd' : 'npm'
+tasks.register('buildWeb', Exec) {
+    workingDir rootProject.file('web')
+    commandLine npm, 'run', 'build'
+    inputs.dir(rootProject.file('web/src'))
+    inputs.files(rootProject.file('web/package-lock.json'), rootProject.file('web/vite.config.ts'))
+    outputs.dir(rootProject.file('web/dist'))
+}
+tasks.named('processResources') {
+    dependsOn 'buildWeb'
+    from(rootProject.file('web/dist')) { into 'web' }
+}

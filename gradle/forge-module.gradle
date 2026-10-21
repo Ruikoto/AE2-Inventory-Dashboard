@@ -1,0 +1,41 @@
+apply plugin: 'net.neoforged.moddev.legacyforge'
+legacyForge { version = '1.20.1-47.4.16' }
+sourceSets.main.java.srcDir(rootProject.file('contracts/src/native/java'))
+dependencies {
+    api project(':contracts')
+    modImplementation('appeng:appliedenergistics2-forge:15.4.10') { transitive = false }
+    testImplementation 'com.google.guava:guava:31.1-jre'
+    testImplementation 'com.google.code.gson:gson:2.10.1'
+}
+tasks.named('jar') {
+    dependsOn ':contracts:classes'
+    from(project(':contracts').sourceSets.main.output)
+    archiveClassifier = 'dev'
+    from(rootProject.file('LICENSES')) { into 'META-INF/licenses' }
+}
+tasks.named('processResources') {
+    inputs.property('version', project.version)
+    filesMatching('META-INF/mods.toml') { expand(version: project.version) }
+}
+tasks.register('verifyRelease') {
+    dependsOn tasks.named('reobfJar')
+    doLast {
+        def jarFile = tasks.named('reobfJar').get().archiveFile.get().asFile
+        new java.util.zip.ZipFile(jarFile).withCloseable { zip ->
+            if (!zip.getEntry('META-INF/mods.toml') || !zip.getEntry('pack.mcmeta')) {
+                throw new GradleException('Missing release metadata')
+            }
+            zip.entries().each { entry ->
+                if (entry.name.endsWith('.class')) {
+                    def stream = new DataInputStream(zip.getInputStream(entry))
+                    try {
+                        if (stream.readInt() != -889275714) throw new GradleException('Invalid class')
+                        stream.readUnsignedShort()
+                        if (stream.readUnsignedShort() > 61) throw new GradleException('Requires Java newer than 17: ' + entry.name)
+                    } finally { stream.close() }
+                }
+            }
+        }
+    }
+}
+tasks.named('check') { dependsOn tasks.named('verifyRelease') }

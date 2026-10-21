@@ -1,0 +1,2 @@
+apply from: rootProject.file('gradle/forge-module.gradle')
+tasks.named('reobfJar') { archiveClassifier = 'client-only' }

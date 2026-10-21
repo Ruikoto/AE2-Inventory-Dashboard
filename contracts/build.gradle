@@ -1,0 +1,4 @@
+dependencies {
+    api 'com.google.guava:guava:31.1-jre'
+    api 'com.google.code.gson:gson:2.10.1'
+}
