@@ -33,3 +33,5 @@
 ## 边界
 
 本地开发、构建和隔离测试已授权。线上安装 Mod、改配置、开端口、重启另行授权。保持旧 AE2-Web-Integration 仓库和发行文件。
+
+2026-10-21 后续授权：用户明确要求推送到 `https://github.com/Ruikoto/AE2-Inventory-Dashboard.git`，并将服务端 JAR 上传到现有服务器，由用户手动重启。该授权不包含修改线上配置、防火墙或代为重启。

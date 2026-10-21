@@ -24,3 +24,9 @@ AE2WI SHA-256: `50b7157d6db3081359fa8fa3d482ecaca5dd10fbe155197bbe5a1863f8dcebc5
 
 ExtendedAE Plus NetworkPatternControllerBlockEntity 不是 ME ControllerBlockEntity 子类，不能按名称包含 Controller 判定。
 这些证据确认版本与接口存在性，不替代编译、运行和整合包兼容验证。不保存密钥、完整日志或玩家信息。
+
+## 执行阶段补核
+
+同日执行阶段重新只读核对 AE2 文件哈希，与上述值一致。发现现场已经安装 `sqlite-jdbc-3.36.0.3+20211227-all.jar`，Mod ID 为 sqlite_jdbc，SHA-256 为 `9d13d1a0cab35216d3a0f7f1dc46f49e90f1f9d6421b8a872427e26b58336e40`。
+
+因此服务端使用同一官方 SQLite Forge adapter 发行文件，通过 Forge Jar-in-Jar 处理既有依赖，避免直接展开另一版本 org.sqlite 类产生分包冲突。已在本地验证有/无外置 sqlite_jdbc 两种启动条件，并在 Linux x86_64 验证原生驱动。
