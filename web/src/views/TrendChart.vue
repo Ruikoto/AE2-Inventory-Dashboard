@@ -203,10 +203,14 @@ watch(() => [props.history, props.rows, props.mode, props.envelope], render, {
   deep: true,
 });
 onMounted(() => {
-  chart = echarts.init(host.value!, undefined, { renderer: "canvas" });
-  observer = new ResizeObserver(() => chart?.resize());
+  observer = new ResizeObserver(() => {
+    if (!host.value?.clientWidth || !host.value.clientHeight) return;
+    if (!chart) {
+      chart = echarts.init(host.value, undefined, { renderer: "canvas" });
+      render();
+    } else chart.resize();
+  });
   observer.observe(host.value!);
-  render();
 });
 onUnmounted(() => {
   observer?.disconnect();

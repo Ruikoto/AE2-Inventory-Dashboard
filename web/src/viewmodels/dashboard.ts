@@ -1,5 +1,6 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { ApiError, request } from "../models/api";
+import { decimalOrder } from "../models/format";
 import {
   defaults,
   loadPreferences,
@@ -22,6 +23,8 @@ export function useDashboard() {
   const history = ref<History>();
   const events = ref<NetworkEvent[]>([]);
   const inventory = ref<Inventory>();
+  const variants = ref<Resource[]>([]);
+  const variantsOpen = ref(false);
   const preferences = reactive(defaults());
   const selected = ref("");
   const settings = ref(false);
@@ -98,7 +101,7 @@ export function useDashboard() {
         if (field === "rate") {
           const av = a.rate ?? "",
             bv = b.rate ?? "";
-          return Number(bv || 0) - Number(av || 0);
+          return decimalOrder(bv || "0", av || "0");
         }
         const av = BigInt(a[field] ?? "0"),
           bv = BigInt(b[field] ?? "0");
@@ -125,13 +128,34 @@ export function useDashboard() {
   function compare(id: string) {
     const i = preferences.comparisons.indexOf(id);
     if (i >= 0) preferences.comparisons.splice(i, 1);
-    else if (preferences.comparisons.length < 6)
+    else if (
+      preferences.comparisons.filter(
+        (id) => id.startsWith("group:") === preferences.merged,
+      ).length < 6
+    )
       preferences.comparisons.push(id);
     else error.value = "最多同时对比 6 项";
   }
   function select(row: Resource) {
     selected.value = row.id;
     mobileDetail.value = true;
+    variants.value = [];
+    variantsOpen.value = false;
+  }
+  async function expandVariants() {
+    variantsOpen.value = !variantsOpen.value;
+    if (!variantsOpen.value || !selected.value.startsWith("group:")) return;
+    const network = networkId.value,
+      id = selected.value;
+    try {
+      const response = await request<Inventory>(
+        `networks/${network}/inventory?merged=false&zeros=true&limit=2000&group=${encodeURIComponent(id)}`,
+      );
+      if (network === networkId.value && id === selected.value)
+        variants.value = response.rows;
+    } catch (e) {
+      fail(e);
+    }
   }
   async function refreshHistory() {
     chartController?.abort();
@@ -181,9 +205,20 @@ export function useDashboard() {
         rows.value = [];
         history.value = undefined;
         try {
-          aliases.value = JSON.parse(
+          const parsed = JSON.parse(
             localStorage.getItem(preferenceKey(world, "aliases")) ?? "{}",
           );
+          aliases.value =
+            parsed && typeof parsed === "object" && !Array.isArray(parsed)
+              ? Object.fromEntries(
+                  Object.entries(parsed)
+                    .filter(
+                      (entry): entry is [string, string] =>
+                        typeof entry[1] === "string",
+                    )
+                    .map(([id, name]) => [id, name.slice(0, 100)]),
+                )
+              : {};
         } catch {
           aliases.value = {};
         }
@@ -201,7 +236,7 @@ export function useDashboard() {
       const id = networkId.value;
       const all: Resource[] = [];
       let first: Inventory | undefined;
-      for (let offset = 0; offset < 100000; offset += 2000) {
+      for (let offset = 0; offset < 200000; offset += 2000) {
         const page = await request<Inventory>(
           `networks/${id}/inventory?merged=${preferences.merged}&zeros=${preferences.zeros}&offset=${offset}&limit=2000`,
           signal,
@@ -218,6 +253,7 @@ export function useDashboard() {
           return;
         }
         first ??= page;
+        if (page.total > 200000) throw new ApiError("INVALID_PARAMETER", 400);
         all.push(...page.rows);
         if (offset + page.rows.length >= page.total) break;
       }
@@ -225,7 +261,7 @@ export function useDashboard() {
       rows.value = all;
       inventory.value = first;
       if (!rows.value.some((r) => r.id === selected.value))
-        selected.value = rows.value[0]?.id ?? "";
+        selected.value = visibleRows.value[0]?.id ?? "";
       const eventResult = await request<{ events: NetworkEvent[] }>(
         `networks/${id}/events`,
         signal,
@@ -249,14 +285,25 @@ export function useDashboard() {
       password.value = "";
       error.value = "";
       await refresh();
-    } catch {
-      error.value = "密码错误或尝试过于频繁";
+    } catch (e) {
+      error.value =
+        e instanceof ApiError && e.status === 403
+          ? "访问地址与服务端配置不一致"
+          : e instanceof ApiError && e.status === 429
+            ? "尝试过于频繁，请稍后重试"
+            : e instanceof ApiError && e.status === 401
+              ? "密码错误"
+              : "服务暂时不可用";
       password.value = "";
     }
   }
   async function logout() {
     await request("session", undefined, { method: "DELETE" });
     rows.value = [];
+    inventory.value = undefined;
+    events.value = [];
+    variants.value = [];
+    variantsOpen.value = false;
     history.value = undefined;
     if (status.value) status.value.authenticated = false;
   }
@@ -288,6 +335,10 @@ export function useDashboard() {
     controller?.abort();
     chartController?.abort();
     rows.value = [];
+    inventory.value = undefined;
+    events.value = [];
+    variants.value = [];
+    variantsOpen.value = false;
     history.value = undefined;
     selected.value = "";
     restoring = true;
@@ -296,6 +347,12 @@ export function useDashboard() {
     void refresh();
   });
   watch(preferences, save, { deep: true, flush: "sync" });
+  watch(
+    () => [preferences.range, customFrom.value, customTo.value],
+    () => {
+      if (stepDisabled(preferences.step)) preferences.step = 0;
+    },
+  );
   watch(
     () => [preferences.merged, preferences.zeros],
     () => {
@@ -364,5 +421,8 @@ export function useDashboard() {
     select,
     toggleFavorite,
     stepDisabled,
+    variants,
+    variantsOpen,
+    expandVariants,
   };
 }

@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { useDashboard } from "../viewmodels/dashboard";
 import {
+  historyReason,
   duration,
   timeRanges,
   steps,
@@ -105,7 +106,9 @@ const chosen = computed(() => selectedRows.value[0]);
       显示最后一次有效库存，曲线已在数据缺口处断开。
     </div>
     <div v-if="status.historyStatus?.startsWith('paused')" class="banner">
-      历史记录暂停：{{ status.historyStatus }}。当前库存继续更新。
+      历史记录暂停：{{
+        historyReason(status.historyStatus)
+      }}。当前库存继续更新。
     </div>
     <section v-if="settings" class="settings-panel" aria-label="本地设置">
       <label
@@ -131,8 +134,8 @@ const chosen = computed(() => selectedRows.value[0]);
           min="40"
           max="70" /></label
       ><span>{{
-        status.assets?.status === "loaded"
-          ? `已加载名称与图标包 · ${status.assets.entries} 项`
+        ["loaded", "partial"].includes(status.assets?.status ?? "")
+          ? `已加载名称与图标包 · ${status.assets?.entries ?? 0} 项`
           : "未加载名称与图标包"
       }}</span
       ><span
@@ -274,7 +277,7 @@ const chosen = computed(() => selectedRows.value[0]);
           </div>
           <div v-if="selectedRows.length === 1" class="resource-stats">
             <div>
-              <span>当前库存</span
+              <span>{{ inventory?.stale ? "最后库存" : "当前库存" }}</span
               ><strong>{{
                 quantity(chosen.quantity, chosen.unit, preferences.buckets)
               }}</strong>
@@ -325,6 +328,28 @@ const chosen = computed(() => selectedRows.value[0]);
         <div v-else class="empty chart-empty">
           <strong>选择资源查看趋势</strong>
           <p>勾选列表右侧复选框可对比最多 6 项</p>
+        </div>
+        <div
+          v-if="preferences.merged && selectedRows.length === 1"
+          class="variant-panel"
+        >
+          <button class="subtle" @click="vm.expandVariants">
+            {{ vm.variantsOpen.value ? "收起变体" : "查看精确变体" }}
+          </button>
+          <div v-if="vm.variantsOpen.value">
+            <div
+              v-for="row in vm.variants.value"
+              :key="row.id"
+              class="variant-row"
+            >
+              <span
+                >{{ row.name }} <small>{{ row.id.slice(0, 8) }}</small></span
+              >
+              <span>{{
+                quantity(row.quantity, row.unit, preferences.buckets)
+              }}</span>
+            </div>
+          </div>
         </div>
         <details v-if="events.length" class="network-events">
           <summary>

@@ -4,5 +4,8 @@ export default defineConfig({
   plugins: [vue()],
   base: "./",
   server: { proxy: { "/api": "http://127.0.0.1:18766" } },
-  build: { chunkSizeWarningLimit: 1200 },
+  build: {
+    chunkSizeWarningLimit: 1200,
+    license: { fileName: "third-party-licenses.txt" },
+  },
 });

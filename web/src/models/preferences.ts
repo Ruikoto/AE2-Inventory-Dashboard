@@ -34,7 +34,29 @@ export function preferenceKey(world: string, network: string): string {
 export function loadPreferences(key: string): Preferences {
   try {
     const input = JSON.parse(localStorage.getItem(key) ?? "{}");
-    const output = { ...defaults(), ...input } as Preferences;
+    const output = defaults();
+    for (const field of ["search", "type", "namespace"] as const)
+      if (typeof input[field] === "string")
+        output[field] = input[field].slice(0, 512);
+    for (const field of [
+      "merged",
+      "onlyFavorites",
+      "zeros",
+      "buckets",
+    ] as const)
+      if (typeof input[field] === "boolean") output[field] = input[field];
+    if (["quantity", "name", "delta", "rate"].includes(input.sort))
+      output.sort = input.sort;
+    if (
+      Number.isFinite(input.range) &&
+      input.range >= 60 &&
+      input.range <= 2592000
+    )
+      output.range = input.range;
+    if (Number.isFinite(input.step) && input.step >= 0)
+      output.step = input.step;
+    if (Number.isFinite(input.ratio))
+      output.ratio = Math.max(40, Math.min(70, input.ratio));
     output.favorites = Array.isArray(input.favorites)
       ? input.favorites
           .filter((x: unknown) => typeof x === "string")
@@ -43,8 +65,19 @@ export function loadPreferences(key: string): Preferences {
     output.comparisons = Array.isArray(input.comparisons)
       ? input.comparisons
           .filter((x: unknown) => typeof x === "string")
-          .slice(0, 6)
+          .slice(0, 12)
       : [];
+    output.comparisons = output.comparisons.filter(
+      (id, index, list) =>
+        list.indexOf(id) === index &&
+        list
+          .slice(0, index)
+          .filter(
+            (other) => other.startsWith("group:") === id.startsWith("group:"),
+          ).length < 6,
+    );
+    if (!["all", "item", "fluid", "other"].includes(output.type))
+      output.type = "all";
     return output;
   } catch {
     return defaults();

@@ -68,7 +68,12 @@ const visible = computed(() =>
                 }}<template v-if="!row.id.startsWith('group:')">
                   · {{ row.id.slice(0, 6) }}</template
                 ><template v-else>
-                  · {{ row.variantCount }} 个变体</template
+                  ·
+                  {{
+                    row.variantCount >= 0
+                      ? `${row.variantCount} 个变体`
+                      : "历史分组"
+                  }}</template
                 ></small
               ></span
             >

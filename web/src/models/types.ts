@@ -49,6 +49,7 @@ export interface Inventory {
   total: number;
 }
 export interface Point {
+  firstQuantity: string;
   timestamp: number;
   segment: string;
   quantity: string;

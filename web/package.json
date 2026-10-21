@@ -10,7 +10,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --config vitest.config.ts",
     "test:browser": "node tools/browser.mjs test",
     "browser:install": "node tools/browser.mjs install chromium",
     "format:check": "prettier --check src tests *.ts *.json index.html",
