@@ -177,7 +177,7 @@ public final class DashboardService implements AutoCloseable {
             } catch (Exception e) {
               broken.add(snapshot.networkId());
               writeStatus = store.status().startsWith("paused") ? store.status() : "paused:write";
-              LOG.error("History sample was not saved", e);
+              LOG.error("History sample could not be confirmed; recording will retry", e);
             } finally {
               pendingSamples.release();
             }

@@ -10,12 +10,12 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import local.ae2dashboard.io.BoundedOutputStream;
 import local.ae2dashboard.model.*;
-import org.sqlite.ProgressHandler;
 
 /** Owned by one writer. Readers use independent, short-lived query-only connections. */
 public final class HistoryStore implements AutoCloseable {
   private final Path path;
-  private final Connection writer;
+  private Connection writer;
+  private final SqliteWatchdog watchdog = new SqliteWatchdog();
   private final long budget;
   private final long maximumGap;
   private final Semaphore readers = new Semaphore(2);
@@ -25,8 +25,7 @@ public final class HistoryStore implements AutoCloseable {
   private long lastMaintenance;
   private long lastActivityRefresh;
   private volatile long retainedFrom;
-  private boolean guardWriteBudget;
-  private boolean budgetInterrupted;
+  private volatile boolean budgetInterrupted;
   private volatile String status = "recording";
   private volatile long bytes;
   private final String worldId;
@@ -46,45 +45,107 @@ public final class HistoryStore implements AutoCloseable {
     }
     path = directory.resolve("history.sqlite");
     budget = budgetBytes;
-    writer = DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
     try {
-      execute(writer, "PRAGMA busy_timeout=1000");
-      // Inspect before creating anything; never reset an unfamiliar database.
-      int version = (int) scalar(writer, "PRAGMA user_version");
-      if (version > 1) throw new SQLException("Unsupported newer database schema");
-      execute(writer, "PRAGMA journal_mode=WAL");
-      execute(writer, "PRAGMA synchronous=NORMAL");
-      execute(writer, "PRAGMA wal_autocheckpoint=256");
-      execute(writer, "PRAGMA journal_size_limit=16777216");
-      execute(
-          writer, "PRAGMA cache_size=-" + Math.max(128, Math.min(8192, budgetBytes / 64 / 1024)));
-      ProgressHandler.setHandler(
-          writer,
-          1000,
-          new ProgressHandler() {
-            @Override
-            protected int progress() throws SQLException {
-              if (Thread.currentThread().isInterrupted()) return 1;
-              if (guardWriteBudget)
-                try {
-                  if (directoryBytes() > budget - Math.min(16L * 1024 * 1024, budget / 8)) {
-                    budgetInterrupted = true;
-                    return 1;
-                  }
-                } catch (IOException e) {
-                  throw new SQLException("Cannot check history budget", e);
-                }
-              return 0;
-            }
-          });
-      long maxPages = Math.max(256, (budgetBytes * 7 / 8) / scalar(writer, "PRAGMA page_size"));
-      execute(writer, "PRAGMA max_page_count=" + maxPages);
+      writer = openWriter();
       schema();
       worldId = meta("worldId", UUID.randomUUID().toString());
       retainedFrom = Long.parseLong(meta("retainedFrom", "0"));
     } catch (SQLException | RuntimeException e) {
-      writer.close();
+      watchdog.close();
+      if (writer != null) writer.close();
       throw e;
+    }
+  }
+
+  private Connection openWriter() throws SQLException {
+    Connection connection = DriverManager.getConnection("jdbc:sqlite:" + path.toAbsolutePath());
+    try {
+      execute(connection, "PRAGMA busy_timeout=1000");
+      // Inspect before creating anything; never reset an unfamiliar database.
+      if (scalar(connection, "PRAGMA user_version") > 1)
+        throw new SQLException("Unsupported newer database schema");
+      execute(connection, "PRAGMA journal_mode=WAL");
+      execute(connection, "PRAGMA synchronous=NORMAL");
+      execute(connection, "PRAGMA wal_autocheckpoint=256");
+      execute(connection, "PRAGMA journal_size_limit=16777216");
+      execute(
+          connection, "PRAGMA cache_size=-" + Math.max(128, Math.min(8192, budget / 64 / 1024)));
+      long maxPages = Math.max(256, (budget * 7 / 8) / scalar(connection, "PRAGMA page_size"));
+      execute(connection, "PRAGMA max_page_count=" + maxPages);
+      return connection;
+    } catch (SQLException | RuntimeException e) {
+      try {
+        connection.close();
+      } catch (SQLException close) {
+        e.addSuppressed(close);
+      }
+      throw e;
+    }
+  }
+
+  private void ensureWriter() throws SQLException {
+    if (writer == null) writer = openWriter();
+  }
+
+  private void discardWriter() throws SQLException {
+    previous.clear();
+    previousBytes = 0;
+    persistedSegments.clear();
+    status = budgetInterrupted ? "paused:space" : "paused:write";
+    Connection failed = writer;
+    writer = null;
+    // Closing rolls back native transactions even when JDBC's auto-commit flag is stale.
+    if (failed != null) failed.close();
+  }
+
+  private WriteTransaction transaction(boolean guardCapacity) throws SQLException {
+    return new WriteTransaction(guardCapacity);
+  }
+
+  private final class WriteTransaction implements AutoCloseable {
+    private final SqliteWatchdog.Operation operation;
+    private boolean committed;
+
+    WriteTransaction(boolean guardCapacity) throws SQLException {
+      ensureWriter();
+      budgetInterrupted = false;
+      operation =
+          watchdog.watch(writer, 0, guardCapacity ? HistoryStore.this::checkCapacity : null);
+      try {
+        writer.setAutoCommit(false);
+      } catch (SQLException | RuntimeException e) {
+        operation.close();
+        try {
+          discardWriter();
+        } catch (SQLException close) {
+          e.addSuppressed(close);
+        }
+        throw e;
+      }
+    }
+
+    void commit() throws SQLException {
+      SqliteWatchdog.checkCurrent();
+      writer.commit();
+      writer.setAutoCommit(true);
+      committed = true;
+    }
+
+    @Override
+    public void close() throws SQLException {
+      operation.close();
+      if (!committed) discardWriter();
+    }
+  }
+
+  private void checkCapacity() throws SQLException {
+    try {
+      if (directoryBytes() > budget - Math.min(16L * 1024 * 1024, budget / 8)) {
+        budgetInterrupted = true;
+        throw new SQLException("History directory reached its write reserve");
+      }
+    } catch (IOException e) {
+      throw new SQLException("Cannot check history budget", e);
     }
   }
 
@@ -107,6 +168,7 @@ public final class HistoryStore implements AutoCloseable {
               "CREATE TABLE IF NOT EXISTS series(network TEXT,resource TEXT,last_active"
                   + " INTEGER,PRIMARY KEY(network,resource)) WITHOUT ROWID",
               "CREATE INDEX IF NOT EXISTS series_activity ON series(last_active)",
+              "CREATE INDEX IF NOT EXISTS series_resource ON series(resource)",
               "CREATE TABLE IF NOT EXISTS sample_frames(network TEXT,segment TEXT,t INTEGER,PRIMARY"
                   + " KEY(network,t)) WITHOUT ROWID",
               "CREATE INDEX IF NOT EXISTS frames_time ON sample_frames(t)",
@@ -114,6 +176,8 @@ public final class HistoryStore implements AutoCloseable {
                   + " INTEGER,first_at INTEGER,last_at INTEGER,samples INTEGER,PRIMARY"
                   + " KEY(network,tier,bucket,segment)) WITHOUT ROWID",
               "CREATE INDEX IF NOT EXISTS coverage_time ON coverage(tier,bucket)",
+              "CREATE INDEX IF NOT EXISTS coverage_segment_last ON"
+                  + " coverage(network,segment,last_at)",
               "CREATE TABLE IF NOT EXISTS raw_changes(network TEXT,resource TEXT,segment TEXT,t"
                   + " INTEGER,q TEXT,PRIMARY KEY(network,resource,segment,t)) WITHOUT ROWID",
               "CREATE INDEX IF NOT EXISTS raw_time ON raw_changes(t)",
@@ -165,6 +229,7 @@ public final class HistoryStore implements AutoCloseable {
     List<Network> result = new ArrayList<>();
     try (var lease = reader();
         var c = lease.connection();
+        var operation = lease.operation();
         var s = c.createStatement();
         var r = s.executeQuery("SELECT * FROM networks ORDER BY created,id")) {
       while (r.next()) {
@@ -189,8 +254,7 @@ public final class HistoryStore implements AutoCloseable {
 
   public void saveNetwork(Network network, String event, Set<String> related) throws SQLException {
     if (!network.status().equals("online")) forget(network.id());
-    writer.setAutoCommit(false);
-    try {
+    try (var transaction = transaction(false)) {
       update(
           writer,
           "INSERT INTO networks VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET"
@@ -210,16 +274,12 @@ public final class HistoryStore implements AutoCloseable {
             network.lastSeen(),
             event,
             gson.toJson(related));
-      writer.commit();
-    } catch (SQLException e) {
-      writer.rollback();
-      throw e;
-    } finally {
-      writer.setAutoCommit(true);
+      transaction.commit();
     }
   }
 
   public void append(Snapshot sample) throws SQLException, IOException {
+    ensureWriter();
     maintain(sample.timestamp());
     long total = directoryBytes();
     if (total >= budget - 1_048_576
@@ -263,9 +323,7 @@ public final class HistoryStore implements AutoCloseable {
     Set<String> keys = new HashSet<>(sample.values().keySet());
     if (continuous) keys.addAll(old.values().keySet());
     budgetInterrupted = false;
-    writer.setAutoCommit(false);
-    try {
-      guardWriteBudget = true;
+    try (var transaction = transaction(true)) {
       update(
           writer,
           "INSERT OR IGNORE INTO sample_frames VALUES(?,?,?)",
@@ -327,7 +385,7 @@ public final class HistoryStore implements AutoCloseable {
           "UPDATE networks SET last_seen=?,status='online' WHERE id=?",
           sample.timestamp(),
           sample.networkId());
-      writer.commit();
+      transaction.commit();
       var replaced = previous.put(sample.networkId(), sample);
       previousBytes += sample.estimatedBytes() - (replaced == null ? 0 : replaced.estimatedBytes());
       while (previous.size() > 128 || previousBytes > 512L * 1024 * 1024) {
@@ -341,14 +399,9 @@ public final class HistoryStore implements AutoCloseable {
       status = "recording";
       bytes = directoryBytes();
     } catch (SQLException | RuntimeException e) {
-      guardWriteBudget = false;
-      writer.rollback();
       forget(sample.networkId());
       status = budgetInterrupted ? "paused:space" : "paused:write";
       throw e;
-    } finally {
-      guardWriteBudget = false;
-      writer.setAutoCommit(true);
     }
   }
 
@@ -524,7 +577,8 @@ public final class HistoryStore implements AutoCloseable {
     long step = History.step(from, to, now, requested);
     long tier = now - from > 7 * History.DAY ? 900_000 : now - from > History.DAY ? 60_000 : 10_000;
     try (var lease = reader();
-        var c = lease.connection()) {
+        var c = lease.connection();
+        var operation = lease.operation()) {
       c.setAutoCommit(false);
       try {
         long start = Math.max(from, retainedFrom);
@@ -568,7 +622,12 @@ public final class HistoryStore implements AutoCloseable {
         c.commit();
         return result;
       } catch (SQLException | RuntimeException e) {
-        c.rollback();
+        operation.close();
+        try {
+          c.rollback();
+        } catch (SQLException rollback) {
+          e.addSuppressed(rollback);
+        }
         throw e;
       }
     }
@@ -787,6 +846,7 @@ public final class HistoryStore implements AutoCloseable {
   public List<Resource> resources(int offset, int limit) throws SQLException {
     try (var lease = reader();
         var c = lease.connection();
+        var operation = lease.operation();
         var s =
             prepare(
                 c,
@@ -805,6 +865,7 @@ public final class HistoryStore implements AutoCloseable {
       throws SQLException {
     try (var lease = reader();
         var c = lease.connection();
+        var operation = lease.operation();
         var s =
             prepare(
                 c,
@@ -827,7 +888,8 @@ public final class HistoryStore implements AutoCloseable {
   public StoredInventory lastInventory(
       String network, boolean grouped, String group, int offset, int limit) throws SQLException {
     try (var lease = reader();
-        var c = lease.connection()) {
+        var c = lease.connection();
+        var operation = lease.operation()) {
       c.setAutoCommit(false);
       try {
         String segment;
@@ -892,7 +954,12 @@ public final class HistoryStore implements AutoCloseable {
         c.commit();
         return new StoredInventory(timestamp, List.copyOf(rows), total);
       } catch (SQLException | RuntimeException e) {
-        c.rollback();
+        operation.close();
+        try {
+          c.rollback();
+        } catch (SQLException rollback) {
+          e.addSuppressed(rollback);
+        }
         throw e;
       }
     }
@@ -902,6 +969,7 @@ public final class HistoryStore implements AutoCloseable {
     Path temporary = Files.createTempFile(target.getParent(), "keys-", ".tmp");
     try (var lease = reader();
         var c = lease.connection();
+        var operation = lease.operation();
         var s = c.createStatement();
         var r =
             s.executeQuery(
@@ -951,6 +1019,7 @@ public final class HistoryStore implements AutoCloseable {
   public List<Map<String, Object>> events(String network) throws SQLException {
     try (var lease = reader();
         var c = lease.connection();
+        var operation = lease.operation();
         var s =
             prepare(
                 c,
@@ -969,98 +1038,112 @@ public final class HistoryStore implements AutoCloseable {
   public void maintain(long now) throws SQLException, IOException {
     if (now - lastMaintenance < 60_000) return;
     lastMaintenance = now;
-    if (now - lastActivityRefresh >= 3_600_000) {
-      try (var touch =
-          writer.prepareStatement(
-              "UPDATE series SET last_active=MAX(last_active,?) WHERE network=? AND resource=?")) {
-        for (Snapshot sample : previous.values())
-          for (var value : sample.values().values())
-            if (value.quantity().signum() > 0) {
-              touch.setLong(1, sample.timestamp());
-              touch.setString(2, sample.networkId());
-              touch.setString(3, value.resource().id());
-              touch.addBatch();
-            }
-        touch.executeBatch();
+    ensureWriter();
+    try (var operation = watchdog.watch(writer, 0, null)) {
+      if (now - lastActivityRefresh >= 3_600_000) {
+        try (var touch =
+            writer.prepareStatement(
+                "UPDATE series SET last_active=MAX(last_active,?) WHERE network=? AND"
+                    + " resource=?")) {
+          for (Snapshot sample : previous.values())
+            for (var value : sample.values().values())
+              if (value.quantity().signum() > 0) {
+                touch.setLong(1, sample.timestamp());
+                touch.setString(2, sample.networkId());
+                touch.setString(3, value.resource().id());
+                touch.addBatch();
+              }
+          touch.executeBatch();
+        }
+        lastActivityRefresh = now;
       }
-      lastActivityRefresh = now;
-    }
-    List<String[]> expired = new ArrayList<>();
-    try (var s =
-            prepare(
-                writer,
-                "SELECT network,resource FROM series WHERE last_active<? LIMIT 1000",
-                now - 30 * History.DAY);
-        var r = s.executeQuery()) {
-      while (r.next()) expired.add(new String[] {r.getString(1), r.getString(2)});
-    }
-    for (String[] key : expired) {
-      for (String table : List.of("raw_changes", "rollup_1m", "rollup_15m", "series"))
-        update(writer, "DELETE FROM " + table + " WHERE network=? AND resource=?", key[0], key[1]);
-    }
-    prune("raw_changes", Math.max(retainedFrom, now - History.DAY));
-    prune("rollup_1m", Math.max(retainedFrom, now - 7 * History.DAY));
-    prune("rollup_15m", Math.max(retainedFrom, now - 30 * History.DAY));
-    update(
-        writer, "DELETE FROM sample_frames WHERE t<?", Math.max(retainedFrom, now - History.DAY));
-    for (long tier : new long[] {10_000, 60_000, 900_000})
+      List<String[]> expired = new ArrayList<>();
+      try (var s =
+              prepare(
+                  writer,
+                  "SELECT network,resource FROM series WHERE last_active<? LIMIT 1000",
+                  now - 30 * History.DAY);
+          var r = s.executeQuery()) {
+        while (r.next()) expired.add(new String[] {r.getString(1), r.getString(2)});
+      }
+      for (String[] key : expired) {
+        for (String table : List.of("raw_changes", "rollup_1m", "rollup_15m", "series"))
+          update(
+              writer, "DELETE FROM " + table + " WHERE network=? AND resource=?", key[0], key[1]);
+      }
+      prune("raw_changes", Math.max(retainedFrom, now - History.DAY));
+      prune("rollup_1m", Math.max(retainedFrom, now - 7 * History.DAY));
+      prune("rollup_15m", Math.max(retainedFrom, now - 30 * History.DAY));
+      update(
+          writer, "DELETE FROM sample_frames WHERE t<?", Math.max(retainedFrom, now - History.DAY));
+      for (long tier : new long[] {10_000, 60_000, 900_000})
+        update(
+            writer,
+            "DELETE FROM coverage WHERE tier=? AND bucket<?",
+            tier,
+            Math.max(
+                    retainedFrom,
+                    now
+                        - (tier == 10_000
+                            ? History.DAY
+                            : tier == 60_000 ? 7 * History.DAY : 30 * History.DAY))
+                - tier);
+      update(writer, "DELETE FROM network_events WHERE t<?", now - 30 * History.DAY);
+      execute(writer, "PRAGMA wal_checkpoint(PASSIVE)");
+      bytes = directoryBytes();
+      long page = scalar(writer, "PRAGMA page_size"),
+          free = scalar(writer, "PRAGMA freelist_count") * page;
+      if (bytes - free > budget * 85 / 100) {
+        for (int round = 0;
+            round < 8
+                && directoryBytes() - scalar(writer, "PRAGMA freelist_count") * page
+                    > budget * 75 / 100;
+            round++) {
+          long oldest = scalar(writer, "SELECT COALESCE(MIN(bucket)," + now + ") FROM coverage");
+          long nextCutoff = Math.min(now - maximumGap, oldest + 6 * 3_600_000);
+          if (nextCutoff <= retainedFrom) break;
+          retainedFrom = nextCutoff;
+          for (String table : List.of("raw_changes", "rollup_1m", "rollup_15m"))
+            prune(table, retainedFrom);
+          update(writer, "DELETE FROM coverage WHERE bucket<?", retainedFrom);
+          update(writer, "DELETE FROM sample_frames WHERE t<?", retainedFrom);
+        }
+        update(
+            writer,
+            "UPDATE meta SET value=? WHERE key='retainedFrom'",
+            Long.toString(retainedFrom));
+      }
       update(
           writer,
-          "DELETE FROM coverage WHERE tier=? AND bucket<?",
-          tier,
-          Math.max(
-                  retainedFrom,
-                  now
-                      - (tier == 10_000
-                          ? History.DAY
-                          : tier == 60_000 ? 7 * History.DAY : 30 * History.DAY))
-              - tier);
-    update(writer, "DELETE FROM network_events WHERE t<?", now - 30 * History.DAY);
-    execute(writer, "PRAGMA wal_checkpoint(PASSIVE)");
-    bytes = directoryBytes();
-    long page = scalar(writer, "PRAGMA page_size"),
-        free = scalar(writer, "PRAGMA freelist_count") * page;
-    if (bytes - free > budget * 85 / 100) {
-      for (int round = 0;
-          round < 8
-              && directoryBytes() - scalar(writer, "PRAGMA freelist_count") * page
-                  > budget * 75 / 100;
-          round++) {
-        long oldest = scalar(writer, "SELECT COALESCE(MIN(bucket)," + now + ") FROM coverage");
-        long nextCutoff = Math.min(now - maximumGap, oldest + 6 * 3_600_000);
-        if (nextCutoff <= retainedFrom) break;
-        retainedFrom = nextCutoff;
-        for (String table : List.of("raw_changes", "rollup_1m", "rollup_15m"))
-          prune(table, retainedFrom);
-        update(writer, "DELETE FROM coverage WHERE bucket<?", retainedFrom);
-        update(writer, "DELETE FROM sample_frames WHERE t<?", retainedFrom);
-      }
+          "DELETE FROM series WHERE NOT EXISTS(SELECT 1 FROM raw_changes r WHERE"
+              + " r.network=series.network AND r.resource=series.resource) AND NOT EXISTS(SELECT 1"
+              + " FROM rollup_1m r WHERE r.network=series.network AND r.resource=series.resource)"
+              + " AND NOT EXISTS(SELECT 1 FROM rollup_15m r WHERE r.network=series.network AND"
+              + " r.resource=series.resource)");
       update(
-          writer, "UPDATE meta SET value=? WHERE key='retainedFrom'", Long.toString(retainedFrom));
+          writer,
+          "DELETE FROM resources WHERE NOT EXISTS(SELECT 1 FROM series s WHERE"
+              + " s.resource=resources.id)");
+      execute(writer, "PRAGMA wal_checkpoint(TRUNCATE)");
+      update(
+          writer,
+          "DELETE FROM controller_anchors WHERE network IN(SELECT id FROM networks WHERE"
+              + " last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE s.network=networks.id))",
+          now - 30 * History.DAY);
+      update(
+          writer,
+          "DELETE FROM networks WHERE last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE"
+              + " s.network=networks.id)",
+          now - 30 * History.DAY);
+      bytes = directoryBytes();
+    } catch (SQLException | RuntimeException e) {
+      try {
+        discardWriter();
+      } catch (SQLException close) {
+        e.addSuppressed(close);
+      }
+      throw e;
     }
-    update(
-        writer,
-        "DELETE FROM series WHERE NOT EXISTS(SELECT 1 FROM raw_changes r WHERE"
-            + " r.network=series.network AND r.resource=series.resource) AND NOT EXISTS(SELECT 1"
-            + " FROM rollup_1m r WHERE r.network=series.network AND r.resource=series.resource) AND"
-            + " NOT EXISTS(SELECT 1 FROM rollup_15m r WHERE r.network=series.network AND"
-            + " r.resource=series.resource)");
-    update(
-        writer,
-        "DELETE FROM resources WHERE NOT EXISTS(SELECT 1 FROM series s WHERE"
-            + " s.resource=resources.id)");
-    execute(writer, "PRAGMA wal_checkpoint(TRUNCATE)");
-    update(
-        writer,
-        "DELETE FROM controller_anchors WHERE network IN(SELECT id FROM networks WHERE last_seen<?"
-            + " AND NOT EXISTS(SELECT 1 FROM series s WHERE s.network=networks.id))",
-        now - 30 * History.DAY);
-    update(
-        writer,
-        "DELETE FROM networks WHERE last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE"
-            + " s.network=networks.id)",
-        now - 30 * History.DAY);
-    bytes = directoryBytes();
   }
 
   private void prune(String table, long cutoff) throws SQLException {
@@ -1089,9 +1172,12 @@ public final class HistoryStore implements AutoCloseable {
     }
   }
 
-  private record ReadLease(Connection connection, Semaphore permits) implements AutoCloseable {
+  private record ReadLease(
+      Connection connection, SqliteWatchdog.Operation operation, Semaphore permits)
+      implements AutoCloseable {
     @Override
     public void close() throws SQLException {
+      operation.close();
       try {
         connection.close();
       } finally {
@@ -1114,17 +1200,7 @@ public final class HistoryStore implements AutoCloseable {
       execute(c, "PRAGMA query_only=ON");
       execute(c, "PRAGMA busy_timeout=1000");
       execute(c, "PRAGMA cache_size=-4096");
-      long deadline = System.nanoTime() + 3_000_000_000L;
-      ProgressHandler.setHandler(
-          c,
-          1000,
-          new ProgressHandler() {
-            @Override
-            protected int progress() {
-              return System.nanoTime() > deadline || Thread.currentThread().isInterrupted() ? 1 : 0;
-            }
-          });
-      return new ReadLease(c, readers);
+      return new ReadLease(c, watchdog.watch(c, 3000, null), readers);
     } catch (SQLException | RuntimeException e) {
       if (c != null)
         try {
@@ -1138,13 +1214,13 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   private static void checkInterrupted() throws SQLException {
-    if (Thread.currentThread().isInterrupted()) throw new SQLException("Query cancelled");
+    SqliteWatchdog.checkCurrent();
   }
 
   private static PreparedStatement prepare(Connection c, String sql, Object... args)
       throws SQLException {
+    checkInterrupted();
     var s = c.prepareStatement(sql);
-    s.setQueryTimeout(3);
     for (int i = 0; i < args.length; i++) s.setObject(i + 1, args[i]);
     return s;
   }
@@ -1163,6 +1239,7 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   private static void execute(Connection c, String sql) throws SQLException {
+    checkInterrupted();
     try (var s = c.createStatement()) {
       s.execute(sql);
     }
@@ -1170,6 +1247,8 @@ public final class HistoryStore implements AutoCloseable {
 
   @Override
   public void close() throws SQLException {
+    watchdog.close();
+    if (writer == null) return;
     try {
       execute(writer, "PRAGMA wal_checkpoint(TRUNCATE)");
     } finally {

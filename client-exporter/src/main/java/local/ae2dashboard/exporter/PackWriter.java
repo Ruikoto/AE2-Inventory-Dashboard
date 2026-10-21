@@ -58,6 +58,8 @@ final class PackWriter {
   }
 
   void add(String id, String registry, String type, String name, BufferedImage pixels) {
+    // Some modular items expose an empty name for their default stack.
+    String displayName = name == null || name.isBlank() ? registry : name;
     worker.execute(
         () -> {
           if (cancelled) return;
@@ -71,7 +73,7 @@ final class PackWriter {
                           Files.newOutputStream(temporary), 512L * 1024 * 1024));
             }
             if (pixels == null) {
-              entries.add(new AssetManifest.Entry(id, registry, type, name, "", 0, 0));
+              entries.add(new AssetManifest.Entry(id, registry, type, displayName, "", 0, 0));
               return;
             }
             if (atlas == null) atlas = new BufferedImage(2040, 2040, BufferedImage.TYPE_INT_ARGB);
@@ -85,7 +87,7 @@ final class PackWriter {
                 atlas.setRGB(x - border, y + p, rgb[p * 64]);
                 atlas.setRGB(x + 63 + border, y + p, rgb[p * 64 + 63]);
               }
-            pending.add(new AssetManifest.Entry(id, registry, type, name, "", x, y));
+            pending.add(new AssetManifest.Entry(id, registry, type, displayName, "", x, y));
             cells++;
             if (cells == 900) flush();
           } catch (Exception e) {

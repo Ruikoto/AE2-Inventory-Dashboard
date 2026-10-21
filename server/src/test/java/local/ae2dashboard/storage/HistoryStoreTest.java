@@ -33,6 +33,80 @@ class HistoryStoreTest {
   }
 
   @Test
+  void nativeRollbackCannotPoisonLaterTransactions() throws Exception {
+    long t = 10 * History.DAY;
+    try (var store = open()) {
+      String worldId = store.worldId();
+      store.append(sample(t, "s", "100"));
+      try (var connection =
+              DriverManager.getConnection("jdbc:sqlite:" + directory.resolve("history.sqlite"));
+          var statement = connection.createStatement()) {
+        statement.execute(
+            "CREATE TRIGGER fail_fixture BEFORE INSERT ON raw_changes WHEN NEW.q='999' BEGIN SELECT"
+                + " RAISE(ROLLBACK,'synthetic failure'); END");
+      }
+      assertThrows(SQLException.class, () -> store.append(sample(t + 10000, "s", "999")));
+      store.saveNetwork(
+          new Network("network", 1, t + 20000, "online", Set.of("a")), null, Set.of());
+      store.append(sample(t + 20000, "s", "123"));
+      assertEquals(worldId, store.worldId());
+      assertEquals("recording", store.status());
+      var result =
+          store
+              .history("network", List.of("item1"), t, t + 20000, 10000, t + 20000)
+              .series()
+              .get(0);
+      assertEquals(
+          List.of("100", "123"), result.points().stream().map(History.Point::quantity).toList());
+      assertFalse(result.complete());
+      assertNull(result.points().get(1).rate());
+    }
+  }
+
+  @Test
+  void completedReadsDoNotPoisonLargeCatalogMaintenance() throws Exception {
+    long t = 10 * History.DAY;
+    List<Resource.Stored> values = new ArrayList<>();
+    for (int i = 0; i < 2000; i++) {
+      var resource =
+          new Resource(
+              "catalog" + i,
+              "group:item:test:c" + i,
+              "item",
+              "test:c" + i,
+              "Catalog",
+              "个",
+              1,
+              "{id:" + i + "}");
+      values.add(new Resource.Stored(resource, BigInteger.valueOf(i + 1)));
+    }
+    try (var store = new HistoryStore(directory, 128 * 1024 * 1024)) {
+      store.saveNetwork(new Network("network", 1, 1, "online", Set.of("a")), null, Set.of());
+      store.append(Snapshot.of("network", "s", t, 1, values));
+      store.history("network", List.of("catalog0"), t, t + 10000, 10000, t + 10000);
+      // Synthetic sample time alone does not expire the old callback's wall-clock deadline.
+      Thread.sleep(3100);
+      for (int i = 1; i <= 18; i++) {
+        long at = t + i * 10000;
+        store.append(Snapshot.of("network", "s", at, i + 1, values));
+        store.history("network", List.of("catalog0", "catalog1999"), t, at, 10000, at);
+      }
+      assertEquals("recording", store.status());
+      assertEquals(t + 180000, store.lastInventory("network", false, "", 0, 10).timestamp());
+      try (var connection =
+              DriverManager.getConnection("jdbc:sqlite:" + directory.resolve("history.sqlite"));
+          var statement = connection.createStatement();
+          var result =
+              statement.executeQuery(
+                  "EXPLAIN QUERY PLAN SELECT 1 FROM series WHERE resource='catalog0'")) {
+        boolean indexed = false;
+        while (result.next()) indexed |= result.getString(4).contains("series_resource");
+        assertTrue(indexed);
+      }
+    }
+  }
+
+  @Test
   void unchangedInventoryAndDisappearanceRemainObservable() throws Exception {
     long t = 10 * History.DAY + 1234;
     try (var store = open()) {

@@ -2,7 +2,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import org.sqlite.ProgressHandler;
+import org.sqlite.SQLiteConnection;
 
 /** Runs against the exact embedded driver on each supported OS. */
 public final class SqliteSmoke {
@@ -23,26 +23,32 @@ public final class SqliteSmoke {
           throw new AssertionError("Exact quantity round trip failed");
         }
       }
-      ProgressHandler.setHandler(
-          writer,
-          1,
-          new ProgressHandler() {
-            @Override
-            protected int progress() {
-              return 1;
-            }
-          });
-      boolean cancelled = false;
-      try {
-        statement.executeQuery(
-            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT"
-                + " sum(x) FROM n");
-      } catch (SQLException expected) {
-        cancelled = expected.getMessage().contains("INTERRUPT");
-      } finally {
-        ProgressHandler.clearHandler(writer);
+      try (var reader = DriverManager.getConnection(url);
+          var query = reader.createStatement()) {
+        var canceller =
+            new Thread(
+                () -> {
+                  try {
+                    Thread.sleep(50);
+                    ((SQLiteConnection) reader).getDatabase().interrupt();
+                  } catch (SQLException | InterruptedException e) {
+                    throw new RuntimeException(e);
+                  }
+                });
+        canceller.start();
+        boolean cancelled = false;
+        try {
+          query.executeQuery(
+              "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000)"
+                  + " SELECT sum(x) FROM n");
+        } catch (SQLException expected) {
+          cancelled = expected.getMessage().contains("INTERRUPT");
+        } finally {
+          canceller.join();
+        }
+        if (!cancelled) throw new AssertionError("Query cancellation failed");
+        statement.execute("INSERT INTO quantities VALUES('9007199254740993')");
       }
-      if (!cancelled) throw new AssertionError("Query cancellation failed");
       try (var result = statement.executeQuery("PRAGMA quick_check")) {
         if (!result.next() || !result.getString(1).equals("ok"))
           throw new AssertionError("Database integrity failed");
@@ -56,7 +62,7 @@ public final class SqliteSmoke {
                 + System.getProperty("os.name")
                 + "; java="
                 + System.getProperty("java.version")
-                + "; WAL/integer/cancellation/integrity=passed");
+                + "; WAL/integer/cancellation-isolation/integrity=passed");
       }
     }
   }
