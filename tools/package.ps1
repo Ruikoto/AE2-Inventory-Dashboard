@@ -16,7 +16,7 @@ try {
     $artifacts = foreach ($file in $files) {
         $name = Split-Path -Leaf $file
         Copy-Item -LiteralPath $file -Destination (Join-Path $OutputDirectory $name) -Force
-        [ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $file).Length }
+        [pscustomobject][ordered]@{ file = $name; sha256 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $file).Length }
     }
     $manifest = [ordered]@{
         version = $version
