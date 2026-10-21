@@ -56,11 +56,16 @@ public final class AssetPack {
         ZipEntry descriptor = zip.getEntry("manifest.json");
         if (descriptor == null || descriptor.getSize() > 32L * 1024 * 1024)
           throw new IOException("Invalid manifest");
-        AssetManifest manifest;
-        try (var in = zip.getInputStream(descriptor);
-            var reader = new InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8)) {
-          manifest = new Gson().fromJson(reader, AssetManifest.class);
+        byte[] manifestBytes;
+        try (var in = zip.getInputStream(descriptor)) {
+          manifestBytes = in.readNBytes(32 * 1024 * 1024 + 1);
         }
+        if (manifestBytes.length > 32 * 1024 * 1024) throw new IOException("Manifest decode limit");
+        AssetManifest manifest =
+            new Gson()
+                .fromJson(
+                    new String(manifestBytes, java.nio.charset.StandardCharsets.UTF_8),
+                    AssetManifest.class);
         if (manifest == null
             || manifest.formatVersion() != 1
             || !AssetManifest.CONTRACT.equals(manifest.identityContract())
@@ -73,6 +78,7 @@ public final class AssetPack {
             || manifest.pages() == null
             || manifest.pages().size() > 512) throw new IOException("Incompatible manifest");
         Map<String, byte[]> pages = new HashMap<>();
+        long loadedBytes = manifestBytes.length;
         for (var page : manifest.pages()) {
           if (!page.hash().matches("[a-f0-9]{64}")
               || page.width() < 64
@@ -88,6 +94,8 @@ public final class AssetPack {
             }
             if (bytes.length > 32 * 1024 * 1024 || !sha(bytes).equals(page.hash()))
               throw new IOException("Page hash mismatch");
+            if (loadedBytes + bytes.length > 512L * 1024 * 1024)
+              throw new IOException("Actual expanded pack limit");
             try (var image = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes))) {
               var readers = ImageIO.getImageReaders(image);
               if (!readers.hasNext()) throw new IOException("Invalid PNG");
@@ -103,6 +111,7 @@ public final class AssetPack {
               }
             }
             pages.put(page.hash(), bytes);
+            loadedBytes += bytes.length;
           } catch (IOException | RuntimeException invalidImage) {
             /* Keep valid names when one image cannot be used. */
           }

@@ -33,6 +33,43 @@ class AssetPackTest {
   }
 
   @Test
+  void falseZipSizeCannotBypassManifestDecodeLimit() throws Exception {
+    Path base = pack(false, false), oversized = directory.resolve("false-size.zip");
+    try (var source = new ZipFile(base.toFile());
+        var out = new ZipOutputStream(Files.newOutputStream(oversized))) {
+      for (var entry : Collections.list(source.entries())) {
+        out.putNextEntry(new ZipEntry(entry.getName()));
+        try (var in = source.getInputStream(entry)) {
+          in.transferTo(out);
+        }
+        if (entry.getName().equals("manifest.json")) {
+          byte[] spaces = new byte[8192];
+          Arrays.fill(spaces, (byte) ' ');
+          for (int i = 0; i < 4096; i++) out.write(spaces);
+        }
+        out.closeEntry();
+      }
+    }
+    byte[] bytes = Files.readAllBytes(oversized);
+    var buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+    boolean patched = false;
+    for (int i = 0; i + 46 < bytes.length; i++) {
+      if (buffer.getInt(i) != 0x02014b50) continue;
+      int length = Short.toUnsignedInt(buffer.getShort(i + 28));
+      if (i + 46 + length > bytes.length) continue;
+      String name = new String(bytes, i + 46, length, java.nio.charset.StandardCharsets.UTF_8);
+      if (name.equals("manifest.json")) {
+        buffer.putInt(i + 24, 1024);
+        patched = true;
+        break;
+      }
+    }
+    assertTrue(patched);
+    Files.write(oversized, bytes);
+    assertEquals("invalid", AssetPack.load(oversized).status());
+  }
+
+  @Test
   void hashMismatchAndTraversalAreRejected() throws Exception {
     var partial = AssetPack.load(pack(true, false));
     assertEquals("partial", partial.status());
