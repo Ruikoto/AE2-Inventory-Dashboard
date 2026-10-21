@@ -30,6 +30,16 @@ public record Resource(
         groupId, groupId, type, registryId, registryId, unit, amountPerUnit, "group:" + groupId);
   }
 
+  public long estimatedBytes() {
+    return 512L
+        + 2L
+            * (identity.length()
+                + name.length()
+                + registryId.length()
+                + id.length()
+                + groupId.length());
+  }
+
   public record Stored(Resource resource, BigInteger quantity) {
     public Stored {
       Objects.requireNonNull(resource);

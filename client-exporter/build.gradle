@@ -1,2 +1,3 @@
 apply from: rootProject.file('gradle/forge-module.gradle')
+base { archivesName = 'ae2-dashboard-assets' }
 tasks.named('reobfJar') { archiveClassifier = 'client-only' }

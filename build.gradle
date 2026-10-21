@@ -25,6 +25,7 @@ subprojects {
         preserveFileTimestamps = false
         reproducibleFileOrder = true
         from(rootProject.file('LICENSE'))
+        from(rootProject.file('NOTICE'))
         manifest.attributes('Implementation-Version': project.version)
     }
 }

@@ -25,7 +25,26 @@ tasks.register('verifyRelease') {
             if (!zip.getEntry('META-INF/mods.toml') || !zip.getEntry('pack.mcmeta')) {
                 throw new GradleException('Missing release metadata')
             }
+            if (project.name == 'server') {
+                if (!zip.getEntry('web/index.html') || !zip.getEntry('META-INF/jarjar/metadata.json')) {
+                    throw new GradleException('Missing bundled web or SQLite dependency')
+                }
+                def embedded = zip.entries().findAll { it.name.startsWith('META-INF/jarjar/') && it.name.endsWith('.jar') }
+                if (embedded.size() != 1) throw new GradleException('Expected one SQLite Forge adapter')
+                def digest = java.security.MessageDigest.getInstance('SHA-256')
+                zip.getInputStream(embedded[0]).withCloseable { input ->
+                    byte[] buffer = new byte[65536]
+                    int count
+                    while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count)
+                }
+                if (digest.digest().encodeHex().toString() != '9d13d1a0cab35216d3a0f7f1dc46f49e90f1f9d6421b8a872427e26b58336e40') {
+                    throw new GradleException('Unexpected SQLite Forge adapter fingerprint')
+                }
+            }
             zip.entries().each { entry ->
+                if (project.name == 'server' && (entry.name.startsWith('local/ae2dashboard/exporter/') || entry.name.startsWith('net/minecraft/client/') || entry.name.startsWith('org/sqlite/'))) {
+                    throw new GradleException('Client code or an unpacked JDBC driver in server JAR: ' + entry.name)
+                }
                 if (entry.name.endsWith('.class')) {
                     def stream = new DataInputStream(zip.getInputStream(entry))
                     try {

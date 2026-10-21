@@ -23,3 +23,9 @@ mandatory=true
 versionRange="[15.4.10,16)"
 ordering="AFTER"
 side="SERVER"
+[[dependencies.ae2dashboard]]
+modId="sqlite_jdbc"
+mandatory=true
+versionRange="[3.36.0.3,4)"
+ordering="AFTER"
+side="SERVER"

@@ -7,6 +7,16 @@ public final class History {
   private History() {}
 
   public static final long DAY = 86_400_000L;
+
+  public static final class InvalidGranularity extends IllegalArgumentException {
+    public final long suggestedStep;
+
+    public InvalidGranularity(long suggestedStep) {
+      super("Unsupported granularity");
+      this.suggestedStep = suggestedStep;
+    }
+  }
+
   public static final long[] STEPS = {
     10_000,
     60_000,
@@ -60,7 +70,7 @@ public final class History {
       if (Arrays.stream(STEPS).noneMatch(s -> s == requested)
           || requested < minimum
           || (to - from + requested - 1) / requested > 1200)
-        throw new IllegalArgumentException("Unsupported granularity; use auto");
+        throw new InvalidGranularity(step(from, to, now, 0));
       return requested;
     }
     for (long step : STEPS)
