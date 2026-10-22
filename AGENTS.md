@@ -6,9 +6,9 @@
 
 1. 确认当前路径属于本独立仓库，检查 Git 状态，保留其他任务的变更。
 2. 先读 [README](README.md)、[交接状态](docs/HANDOFF.md)；修改前读 [实施基线](docs/IMPLEMENTATION_PLAN.md)、[验收清单](docs/ACCEPTANCE.md) 及对应模块协议。
-3. 统计和网页以 [0.1.2 实施约定](docs/UX_012_PLAN.md)、[协议](docs/PROTOCOL.md) 为当前依据；原始完整计划是历史需求，不能覆盖后续确认的行为。
+3. 统计以 [0.1.2 实施约定](docs/UX_012_PLAN.md) 为依据；网格、无限项和合成订单以 [0.1.3 实施约定](docs/CRAFTING_013_PLAN.md)、[协议](docs/PROTOCOL.md) 为依据。原始完整计划不能覆盖后续确认的行为。
 4. 简述本次目标、修改模块、验证及交付范围。普通实现选择自行决定；只有影响已确认行为、架构或交付边界的未知项才需要澄清。
-5. [验证记录](docs/VALIDATION.md) 和 [0.1.2 验证](docs/UX_012_VALIDATION.md) 是有日期的证据，不是当前服务器状态，也不是所有未来修改的通过证明。
+5. [验证记录](docs/VALIDATION.md)、[0.1.2 验证](docs/UX_012_VALIDATION.md) 和 [0.1.3 验证](docs/CRAFTING_013_VALIDATION.md) 是有日期的证据，不是当前服务器状态，也不是所有未来修改的通过证明。
 
 ## 模块与责任入口
 
@@ -16,7 +16,7 @@
 |---|---|
 | contracts | 原生无关模型、身份与资源包协议；History 负责精确统计，NetworkIdentity 负责重识别。Minecraft NBT 桥接位于 contracts/src/native/java，由两个 Forge 模块编译 |
 | server/forge | MonitoringGridService 发现网络，AeSampler 在游戏线程读取 AE，DashboardMod 管理生命周期 |
-| server | DashboardService 发布不可变快照与有界写入；storage/HistoryStore 保存和查询历史，SqliteWatchdog 管理读取取消；http 负责只读 API 和会话；assets 负责可选显示包 |
+| server | DashboardService 发布不可变快照与有界写入；CraftingService 协调持久订单，forge/AeCrafting 负责原生合成；HistoryStore 保存统计和订单，SqliteWatchdog 管理读取取消；http 负责 API 和会话；assets 负责可选显示包 |
 | client-exporter | ClientCommands 采集本地变体，IconRenderer 在渲染线程生成像素，PackWriter 后台编码并完整发布资源包；只装客户端 |
 | web | Vue MVVM：models 为协议、精确数值、偏好和 Worker；viewmodels 管理状态、请求和取消；views 渲染，不自行请求历史 |
 
@@ -34,7 +34,9 @@ Java 路径均从模块 src/main/java/local/ae2dashboard 开始；网页路径�
 - inventory 的旧 delta/rate 是相邻采样兼容字段；网页区间值取 statistics。Point.rate 保持相邻显示点语义，smoothedRate 独立表示滚动平均。缺省或 null 的指标必须清除旧值；分页遇到版本变化不能混合结果。
 - 图表默认数量＋速率双轴，不同单位分图，默认五分钟平滑。波动带只表示真实 min/max，不制造精度或产量。
 - 资源包只增强名称和图标；缺失、损坏、部分覆盖不得影响身份、数量、历史或收藏。服务端不得加载客户端渲染代码。
-- HTTP 业务只读，登录退出只改变会话，不增加游戏写入、配置修改或上传接口。API 不返回原始 NBT、密码、路径或堆栈。
+- 监测 HTTP 接口只读；仅明确的 crafting 路由允许合成写入，要求现有访问权限及同源 Origin。craftingEnabled 默认开启，关闭后禁止新预览/提交但保留已有订单查看和取消；public 模式允许访客下单。同网络订单共享，不增加配置写入或上传接口。API 不返回原始 NBT、密码、路径或堆栈。
+- 订单意图先落盘再调用 AE，所有写入复用唯一写线程；完成/取消来自原生生命周期钩子，不能靠任务消失判断完成。重启只按原生 UUID 恢复，结果未知不自动重下。只跟踪本项目订单，取消前核对 UUID 和网络归属。
+- 无限标记只影响库存目录的显示/筛选，数量和统计保持真实值；从当前网络中 ExtendedAE InfinityCellInventory 来源识别，不按大整数阈值猜测，不把有限的大容量单元当无限。
 - 网页偏好按站点/API/worldId/networkId 隔离，精确与合并收藏分开；已知空网络默认隐藏，未知不当空。Worker 处理大目录，主线程只接可见窗口；保留刷新时的滚动、选择和图表交互，取消及过期响应不得覆盖新上下文。
 
 ## 构建与必要验证

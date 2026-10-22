@@ -14,7 +14,32 @@ public record Config(
     int historyBudgetMiB,
     boolean secureCookie,
     Path assetPack,
-    String publicOrigin) {
+    String publicOrigin,
+    boolean craftingEnabled) {
+  /** 旧调用方沿用默认开放合成；显式配置使用完整构造函数。 */
+  public Config(
+      String bindAddress,
+      int port,
+      String authMode,
+      String password,
+      int sampleIntervalSeconds,
+      int historyBudgetMiB,
+      boolean secureCookie,
+      Path assetPack,
+      String publicOrigin) {
+    this(
+        bindAddress,
+        port,
+        authMode,
+        password,
+        sampleIntervalSeconds,
+        historyBudgetMiB,
+        secureCookie,
+        assetPack,
+        publicOrigin,
+        true);
+  }
+
   public static Config load(Path directory) throws IOException {
     Files.createDirectories(directory);
     Path path = directory.resolve("ae2-dashboard.properties");
@@ -31,6 +56,7 @@ public record Config(
     p.putIfAbsent("secureCookie", "false");
     p.putIfAbsent("assetPack", "ae2-dashboard-assets.zip");
     p.putIfAbsent("publicOrigin", "");
+    p.putIfAbsent("craftingEnabled", "true");
     if (p.getProperty("password", "").isBlank()) {
       byte[] bytes = new byte[32];
       new SecureRandom().nextBytes(bytes);
@@ -42,6 +68,9 @@ public record Config(
         interval = integer(p, "sampleIntervalSeconds", 2, 3600),
         budget = integer(p, "historyBudgetMiB", 16, 65536);
     boolean secure = Boolean.parseBoolean(p.getProperty("secureCookie"));
+    String crafting = p.getProperty("craftingEnabled").trim();
+    if (!Set.of("true", "false").contains(crafting))
+      throw new IOException("Invalid craftingEnabled");
     String origin = p.getProperty("publicOrigin").trim();
     if (!origin.isEmpty() && !origin.matches("https?://[A-Za-z0-9.\\-\\[\\]:]+"))
       throw new IOException("Invalid publicOrigin");
@@ -70,7 +99,8 @@ public record Config(
         budget,
         secure,
         asset,
-        origin);
+        origin,
+        Boolean.parseBoolean(crafting));
   }
 
   private static int integer(Properties p, String key, int min, int max) throws IOException {

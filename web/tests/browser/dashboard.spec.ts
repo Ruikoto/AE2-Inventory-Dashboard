@@ -146,6 +146,14 @@ async function mock(page: import("@playwright/test").Page) {
   });
 }
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(
+    ({ world, network }) => {
+      const key = `ae2dash:1:${location.origin}:/:${world}:${network}`;
+      if (!localStorage.getItem(key))
+        localStorage.setItem(key, JSON.stringify({ inventoryView: "list" }));
+    },
+    { world, network },
+  );
   await mock(page);
 });
 test("works without client resources, preserves exact quantities and local favorites", async ({

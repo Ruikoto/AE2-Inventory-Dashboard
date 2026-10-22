@@ -31,9 +31,9 @@ try {
         modDevGradle = '2.0.86'
         node = (node --version)
         apiVersion = 1
-        schemaVersion = 1
+        schemaVersion = 2
         identityContract = 'ae2wi-1.2.0-pre-forge-1.20.1'
-        validation = 'See docs/VALIDATION.md; development build, not a full modpack certification.'
+        validation = 'See docs/CRAFTING_013_VALIDATION.md; development build, not a full modpack certification.'
         artifacts = @($artifacts)
     }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Encoding utf8NoBOM

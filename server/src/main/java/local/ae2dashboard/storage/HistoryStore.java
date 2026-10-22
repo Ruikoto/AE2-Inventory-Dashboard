@@ -68,7 +68,7 @@ public final class HistoryStore implements AutoCloseable {
     try {
       execute(connection, "PRAGMA busy_timeout=1000");
       // Inspect before creating anything; never reset an unfamiliar database.
-      if (scalar(connection, "PRAGMA user_version") > 1)
+      if (scalar(connection, "PRAGMA user_version") > 2)
         throw new SQLException("Unsupported newer database schema");
       execute(connection, "PRAGMA journal_mode=WAL");
       execute(connection, "PRAGMA synchronous=NORMAL");
@@ -196,8 +196,19 @@ public final class HistoryStore implements AutoCloseable {
                   + " INTEGER,first_at INTEGER,last_at INTEGER,first_q TEXT,last_q TEXT,min_q"
                   + " TEXT,max_q TEXT,samples INTEGER,PRIMARY KEY(network,resource,segment,t))"
                   + " WITHOUT ROWID",
-              "CREATE INDEX IF NOT EXISTS quarter_time ON rollup_15m(t)")) execute(writer, sql);
-      execute(writer, "PRAGMA user_version=1");
+              "CREATE INDEX IF NOT EXISTS quarter_time ON rollup_15m(t)",
+              "CREATE TABLE IF NOT EXISTS inventory_capabilities(network TEXT NOT NULL,resource"
+                  + " TEXT NOT NULL,craftable INTEGER NOT NULL,infinite INTEGER NOT NULL,PRIMARY"
+                  + " KEY(network,resource)) WITHOUT ROWID",
+              "CREATE TABLE IF NOT EXISTS crafting_orders(id TEXT PRIMARY KEY,network TEXT NOT"
+                  + " NULL,request_id TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT"
+                  + " NULL,finished INTEGER NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,"
+                  + " UNIQUE(network,request_id))",
+              "CREATE INDEX IF NOT EXISTS orders_network_time ON crafting_orders(network,created"
+                  + " DESC,id DESC)",
+              "CREATE INDEX IF NOT EXISTS orders_finished ON crafting_orders(finished)"))
+        execute(writer, sql);
+      execute(writer, "PRAGMA user_version=2");
       writer.commit();
     } catch (SQLException e) {
       writer.rollback();
@@ -367,8 +378,8 @@ public final class HistoryStore implements AutoCloseable {
                   + " last_active=MAX(last_active,excluded.last_active)",
               sample.networkId(),
               id,
-              q.signum() > 0 ? sample.timestamp() : 0);
-        if (!continuous || !q.equals(prior)) {
+              q.signum() > 0 || value != null && value.craftable() ? sample.timestamp() : 0);
+        if (!continuous || before == null || !q.equals(prior)) {
           update(
               writer,
               "INSERT OR REPLACE INTO raw_changes VALUES(?,?,?,?,?)",
@@ -380,6 +391,7 @@ public final class HistoryStore implements AutoCloseable {
           aggregate(sample.networkId(), id, segment, sample.timestamp(), q, prior);
         }
       }
+      saveCapabilities(sample);
       update(
           writer,
           "UPDATE networks SET last_seen=?,status='online' WHERE id=?",
@@ -409,6 +421,47 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   private final Map<String, String> persistedSegments = new HashMap<>();
+
+  /** 标记属于完整网络观测；只改变化项，避免每次采样重写整个目录。 */
+  private void saveCapabilities(Snapshot sample) throws SQLException {
+    Map<String, Integer> previousFlags = new HashMap<>();
+    try (var s =
+            prepare(
+                writer,
+                "SELECT resource,craftable,infinite FROM inventory_capabilities WHERE network=?",
+                sample.networkId());
+        var r = s.executeQuery()) {
+      while (r.next()) previousFlags.put(r.getString(1), r.getInt(2) | r.getInt(3) << 1);
+    }
+    for (var value : sample.values().values()) {
+      String id = value.resource().id();
+      int flags = (value.craftable() ? 1 : 0) | (value.infinite() ? 2 : 0);
+      Integer old = previousFlags.remove(id);
+      if (flags == 0) {
+        if (old != null)
+          update(
+              writer,
+              "DELETE FROM inventory_capabilities WHERE network=? AND resource=?",
+              sample.networkId(),
+              id);
+      } else if (old == null || old != flags) {
+        update(
+            writer,
+            "INSERT INTO inventory_capabilities VALUES(?,?,?,?) ON CONFLICT(network,resource)"
+                + " DO UPDATE SET craftable=excluded.craftable,infinite=excluded.infinite",
+            sample.networkId(),
+            id,
+            value.craftable() ? 1 : 0,
+            value.infinite() ? 1 : 0);
+      }
+    }
+    for (String id : previousFlags.keySet())
+      update(
+          writer,
+          "DELETE FROM inventory_capabilities WHERE network=? AND resource=?",
+          sample.networkId(),
+          id);
+  }
 
   private void forget(String network) {
     var old = previous.remove(network);
@@ -1006,7 +1059,7 @@ public final class HistoryStore implements AutoCloseable {
 
   public record StoredInventory(long timestamp, List<Resource.Stored> rows, int total) {}
 
-  public record Observation(long timestamp, long nonZeroResources) {}
+  public record Observation(long timestamp, long nonZeroResources, long craftableResources) {}
 
   public Observation lastObservation(String network) throws SQLException {
     try (var lease = reader();
@@ -1020,11 +1073,16 @@ public final class HistoryStore implements AutoCloseable {
                     + " FROM series s WHERE s.network=? AND s.resource NOT LIKE 'group:%' AND"
                     + " COALESCE((SELECT last_q FROM rollup_15m v WHERE v.network=s.network AND"
                     + " v.resource=s.resource AND v.segment=latest.segment ORDER BY t DESC LIMIT"
-                    + " 1),'0')<>'0') FROM latest",
+                    + " 1),'0')<>'0'),(SELECT COUNT(*) FROM inventory_capabilities c WHERE"
+                    + " c.network=? AND c.resource NOT LIKE 'group:%' AND c.craftable=1) FROM"
+                    + " latest",
+                network,
                 network,
                 network);
         var r = s.executeQuery()) {
-      return r.next() ? new Observation(r.getLong(1), r.getLong(2)) : new Observation(0, 0);
+      return r.next()
+          ? new Observation(r.getLong(1), r.getLong(2), r.getLong(3))
+          : new Observation(0, 0, 0);
     }
   }
 
@@ -1052,7 +1110,8 @@ public final class HistoryStore implements AutoCloseable {
           timestamp = r.getLong(2);
         }
         String where =
-            " FROM resources r JOIN series s ON s.resource=r.id WHERE s.network=? AND (r.id LIKE"
+            " FROM resources r JOIN series s ON s.resource=r.id LEFT JOIN inventory_capabilities"
+                + " c ON c.network=s.network AND c.resource=r.id WHERE s.network=? AND (r.id LIKE"
                 + " 'group:%')=? AND (?='' OR r.group_id=?)";
         int total;
         try (var s = prepare(c, "SELECT COUNT(*)" + where, network, grouped ? 1 : 0, group, group);
@@ -1079,6 +1138,7 @@ public final class HistoryStore implements AutoCloseable {
                     "SELECT r.id,r.group_id,r.type,r.registry_id,r.name,r.unit,r.amount_per_unit,''"
                         + " AS identity,"
                         + quantity
+                        + ",COALESCE(c.craftable,0) AS craftable,COALESCE(c.infinite,0) AS infinite"
                         + where
                         + " ORDER BY r.id LIMIT ? OFFSET ?",
                     segment,
@@ -1092,7 +1152,12 @@ public final class HistoryStore implements AutoCloseable {
                     offset);
             var r = s.executeQuery()) {
           while (r.next())
-            rows.add(new Resource.Stored(resource(r), new BigInteger(r.getString("quantity"))));
+            rows.add(
+                new Resource.Stored(
+                    resource(r),
+                    new BigInteger(r.getString("quantity")),
+                    r.getInt("craftable") != 0,
+                    r.getInt("infinite") != 0));
         }
         c.commit();
         return new StoredInventory(timestamp, List.copyOf(rows), total);
@@ -1178,6 +1243,149 @@ public final class HistoryStore implements AutoCloseable {
     }
   }
 
+  public Crafting.Order findOrder(String network, String id) throws SQLException {
+    try (var lease = reader()) {
+      return readOrder(
+          lease.connection(),
+          "SELECT payload FROM crafting_orders WHERE network=? AND id=?",
+          network,
+          id);
+    }
+  }
+
+  public Crafting.Order findOrderByRequest(String network, String requestId) throws SQLException {
+    try (var lease = reader()) {
+      return readOrder(
+          lease.connection(),
+          "SELECT payload FROM crafting_orders WHERE network=? AND request_id=?",
+          network,
+          requestId);
+    }
+  }
+
+  /** 必须在唯一写入线程调用；返回已存在的同请求订单，不重复生成提交意图。 */
+  public Crafting.Order insertOrderIntent(Crafting.Order order) throws SQLException {
+    // 小事务可能在 watchdog 首轮之前结束，因此先检查写入预留。
+    checkCapacity();
+    try (var transaction = transaction(true)) {
+      update(
+          writer,
+          "INSERT OR IGNORE INTO crafting_orders VALUES(?,?,?,?,?,?,?,?)",
+          order.id(),
+          order.networkId(),
+          order.requestId(),
+          order.createdAt(),
+          order.updatedAt(),
+          order.finishedAt(),
+          order.state(),
+          gson.toJson(order));
+      Crafting.Order stored =
+          readOrder(
+              writer,
+              "SELECT payload FROM crafting_orders WHERE network=? AND request_id=?",
+              order.networkId(),
+              order.requestId());
+      if (stored == null) throw new SQLException("Order identifier collision");
+      transaction.commit();
+      return stored;
+    }
+  }
+
+  /** 事件按序写入；旧进度和恢复消息不能覆盖已确认的终态。 */
+  public void saveOrder(Crafting.Order order) throws SQLException {
+    checkCapacity();
+    try (var transaction = transaction(true)) {
+      int changed =
+          update(
+              writer,
+              "UPDATE crafting_orders SET updated=?,finished=?,state=?,payload=? WHERE id=?"
+                  + " AND network=? AND updated<=? AND finished=0",
+              order.updatedAt(),
+              order.finishedAt(),
+              order.state(),
+              gson.toJson(order),
+              order.id(),
+              order.networkId(),
+              order.updatedAt());
+      if (changed == 0
+          && readOrder(
+                  writer,
+                  "SELECT payload FROM crafting_orders WHERE id=? AND network=?",
+                  order.id(),
+                  order.networkId())
+              == null) throw new SQLException("Missing persisted order intent");
+      transaction.commit();
+    }
+  }
+
+  public List<Crafting.Order> activeOrders() throws SQLException {
+    try (var lease = reader();
+        var s =
+            prepare(
+                lease.connection(),
+                "SELECT payload FROM crafting_orders WHERE finished=0 ORDER BY created,id LIMIT"
+                    + " 1025");
+        var r = s.executeQuery()) {
+      List<Crafting.Order> result = new ArrayList<>();
+      while (r.next()) result.add(gson.fromJson(r.getString(1), Crafting.Order.class));
+      if (result.size() > 1024) throw new SQLException("Active orders exceed the recovery limit");
+      return List.copyOf(result);
+    }
+  }
+
+  public Crafting.OrderPage orders(String network, boolean history, int limit, String cursor)
+      throws SQLException {
+    if (limit < 1 || limit > 100) throw new IllegalArgumentException("Invalid order page limit");
+    long before = Long.MAX_VALUE;
+    String beforeId = "~";
+    if (cursor != null && !cursor.isEmpty()) {
+      if (cursor.length() > 128) throw new IllegalArgumentException("Invalid order cursor");
+      String decoded =
+          new String(
+              Base64.getUrlDecoder().decode(cursor), java.nio.charset.StandardCharsets.UTF_8);
+      String[] parts = decoded.split(":", -1);
+      if (parts.length != 2) throw new IllegalArgumentException("Invalid order cursor");
+      before = Long.parseLong(parts[0]);
+      beforeId = UUID.fromString(parts[1]).toString();
+    }
+    try (var lease = reader();
+        var s =
+            prepare(
+                lease.connection(),
+                "SELECT payload FROM crafting_orders WHERE network=? AND (finished>0)=? AND"
+                    + " (created<? OR (created=? AND id<?)) ORDER BY created DESC,id DESC LIMIT ?",
+                network,
+                history ? 1 : 0,
+                before,
+                before,
+                beforeId,
+                limit + 1);
+        var r = s.executeQuery()) {
+      List<Crafting.Order> result = new ArrayList<>();
+      while (r.next()) result.add(gson.fromJson(r.getString(1), Crafting.Order.class));
+      String next = "";
+      if (result.size() > limit) {
+        result.remove(result.size() - 1);
+        Crafting.Order last = result.get(result.size() - 1);
+        next =
+            Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(
+                    (last.createdAt() + ":" + last.id())
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      }
+      return new Crafting.OrderPage(result, next);
+    }
+  }
+
+  private Crafting.Order readOrder(Connection connection, String sql, Object... args)
+      throws SQLException {
+    try (var s = prepare(connection, sql, args);
+        var r = s.executeQuery()) {
+      return r.next() ? gson.fromJson(r.getString(1), Crafting.Order.class) : null;
+    }
+  }
+
   public void maintain(long now) throws SQLException, IOException {
     if (now - lastMaintenance < 60_000) return;
     lastMaintenance = now;
@@ -1191,7 +1399,7 @@ public final class HistoryStore implements AutoCloseable {
                     + " resource=?")) {
           for (Snapshot sample : previous.values())
             for (var value : sample.values().values())
-              if (value.quantity().signum() > 0) {
+              if (value.quantity().signum() > 0 || value.craftable()) {
                 touch.setLong(1, sample.timestamp());
                 touch.setString(2, sample.networkId());
                 touch.setString(3, value.resource().id());
@@ -1205,7 +1413,11 @@ public final class HistoryStore implements AutoCloseable {
       try (var s =
               prepare(
                   writer,
-                  "SELECT network,resource FROM series WHERE last_active<? LIMIT 1000",
+                  "SELECT network,resource FROM series s WHERE last_active<? AND NOT EXISTS"
+                      + " (SELECT 1 FROM inventory_capabilities c WHERE c.network=s.network"
+                      + " AND c.resource=s.resource AND c.craftable=1 AND EXISTS(SELECT 1"
+                      + " FROM networks n WHERE n.id=c.network AND n.last_seen>=?)) LIMIT 1000",
+                  now - 30 * History.DAY,
                   now - 30 * History.DAY);
           var r = s.executeQuery()) {
         while (r.next()) expired.add(new String[] {r.getString(1), r.getString(2)});
@@ -1233,6 +1445,10 @@ public final class HistoryStore implements AutoCloseable {
                             : tier == 60_000 ? 7 * History.DAY : 30 * History.DAY))
                 - tier);
       update(writer, "DELETE FROM network_events WHERE t<?", now - 30 * History.DAY);
+      update(
+          writer,
+          "DELETE FROM crafting_orders WHERE finished>0 AND finished<?",
+          now - 30 * History.DAY);
       execute(writer, "PRAGMA wal_checkpoint(PASSIVE)");
       bytes = directoryBytes();
       long page = scalar(writer, "PRAGMA page_size"),
@@ -1272,13 +1488,21 @@ public final class HistoryStore implements AutoCloseable {
       update(
           writer,
           "DELETE FROM controller_anchors WHERE network IN(SELECT id FROM networks WHERE"
-              + " last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE s.network=networks.id))",
+              + " last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE s.network=networks.id)"
+              + " AND NOT EXISTS(SELECT 1 FROM crafting_orders o WHERE o.network=networks.id))",
           now - 30 * History.DAY);
       update(
           writer,
           "DELETE FROM networks WHERE last_seen<? AND NOT EXISTS(SELECT 1 FROM series s WHERE"
-              + " s.network=networks.id)",
+              + " s.network=networks.id) AND NOT EXISTS(SELECT 1 FROM crafting_orders o WHERE"
+              + " o.network=networks.id)",
           now - 30 * History.DAY);
+      update(
+          writer,
+          "DELETE FROM inventory_capabilities WHERE NOT EXISTS(SELECT 1 FROM networks n WHERE"
+              + " n.id=inventory_capabilities.network) OR NOT EXISTS(SELECT 1 FROM series s WHERE"
+              + " s.network=inventory_capabilities.network AND"
+              + " s.resource=inventory_capabilities.resource)");
       bytes = directoryBytes();
     } catch (SQLException | RuntimeException e) {
       try {

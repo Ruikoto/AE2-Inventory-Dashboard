@@ -8,6 +8,7 @@ let preferences: Preferences = defaults(),
   selected = "",
   activeIds: string[] = [];
 let start = 0,
+  columns = 1,
   count = 40,
   context = 0,
   epoch = 0;
@@ -17,7 +18,10 @@ let statisticsReady = false;
 let namespaces: string[] = [];
 let viewRevision = 0;
 function publish() {
-  start = Math.max(0, Math.min(start, Math.max(0, filtered.length - 1)));
+  start =
+    Math.floor(
+      Math.max(0, Math.min(start, Math.max(0, filtered.length - 1))) / columns,
+    ) * columns;
   postMessage({
     type: "view",
     context,
@@ -177,8 +181,12 @@ onmessage = (event) => {
     if (changed) filter();
     else publish();
   } else if (message.type === "window") {
-    start = message.start;
-    count = Math.min(120, message.count);
+    columns = Math.max(1, Math.min(6, message.columns ?? 1));
+    start = Math.floor(message.start / columns) * columns;
+    count = Math.min(
+      Math.floor(120 / columns) * columns,
+      Math.ceil(message.count / columns) * columns,
+    );
     publish();
   }
 };

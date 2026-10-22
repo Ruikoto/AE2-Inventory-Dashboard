@@ -1,6 +1,20 @@
 import { test, expect, type Page } from "@playwright/test";
 import { dashboardFixture, networks, world } from "./fixture";
 
+// 这些回归专门验证原有列表与图表；新默认网格另有独立覆盖。
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(
+    ({ world, networks }) => {
+      for (const network of networks) {
+        const key = `ae2dash:1:${location.origin}:/:${world}:${network}`;
+        if (!localStorage.getItem(key))
+          localStorage.setItem(key, JSON.stringify({ inventoryView: "list" }));
+      }
+    },
+    { world, networks },
+  );
+});
+
 async function ready(page: Page) {
   await page.goto("/");
   await expect(page.locator(".inventory-row").first()).toBeVisible();

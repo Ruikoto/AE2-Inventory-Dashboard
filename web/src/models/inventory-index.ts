@@ -40,7 +40,8 @@ export class InventoryIndex {
               : row.type === p.type)) &&
           (!p.namespace || key.namespace === p.namespace) &&
           (!p.onlyFavorites || favorites.has(row.id)) &&
-          (p.zeros || key.quantity !== 0n)
+          (!p.excludeInfinite || !row.infinite) &&
+          (p.zeros || key.quantity !== 0n || row.craftable === true)
         );
       })
       .sort((a, b) => {

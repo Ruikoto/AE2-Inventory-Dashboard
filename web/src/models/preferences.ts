@@ -6,6 +6,8 @@ export interface Preferences {
   namespace: string;
   merged: boolean;
   onlyFavorites: boolean;
+  excludeInfinite: boolean;
+  inventoryView: "grid" | "list";
   zeros: boolean;
   range: number;
   step: number;
@@ -24,6 +26,8 @@ export const defaults = (): Preferences => ({
   namespace: "",
   merged: false,
   onlyFavorites: false,
+  excludeInfinite: false,
+  inventoryView: "grid",
   zeros: false,
   range: 3600,
   step: 0,
@@ -50,6 +54,7 @@ export function loadPreferences(
     for (const field of [
       "merged",
       "onlyFavorites",
+      "excludeInfinite",
       "zeros",
       "buckets",
       "envelope",
@@ -57,6 +62,8 @@ export function loadPreferences(
       if (typeof input[field] === "boolean") output[field] = input[field];
     if (["quantity", "name", "delta", "rate"].includes(input.sort))
       output.sort = input.sort;
+    if (["grid", "list"].includes(input.inventoryView))
+      output.inventoryView = input.inventoryView;
     if (["quantity", "rate", "both"].includes(input.mode))
       output.mode = input.mode;
     if ([60000, 300000, 900000].includes(input.rateWindow))

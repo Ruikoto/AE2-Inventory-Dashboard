@@ -1,3 +1,24 @@
+import type { Resource } from "./types";
+
+export function inventoryQuantity(row: Resource, buckets = false): string {
+  return row.infinite ? "无限" : quantity(row.quantity, row.unit, buckets);
+}
+
+export function trend(row: Resource): {
+  symbol: string;
+  label: string;
+  className: string;
+} {
+  if (row.delta == null)
+    return { symbol: "—", label: "暂无趋势", className: "" };
+  const delta = BigInt(row.delta);
+  return delta > 0n
+    ? { symbol: "↑", label: "区间库存上涨", className: "positive" }
+    : delta < 0n
+      ? { symbol: "↓", label: "区间库存下降", className: "negative" }
+      : { symbol: "→", label: "区间库存持平", className: "" };
+}
+
 export function quantity(
   value: string | null | undefined,
   unit = "",

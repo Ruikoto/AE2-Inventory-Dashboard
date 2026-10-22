@@ -17,6 +17,8 @@ export interface Resource {
   delta: string | null;
   rate: string | null;
   variantCount: number;
+  craftable?: boolean;
+  infinite?: boolean;
   icon?: Icon;
   statisticsFrom?: number;
   statisticsTo?: number;
@@ -30,11 +32,14 @@ export interface Network {
   lastSeen: number;
   anchors: string[];
   nonZeroResources?: number | null;
+  craftableResources?: number | null;
   observedAt?: number | null;
 }
 export interface Status {
   authenticated: boolean;
   authMode: string;
+  craftingEnabled?: boolean;
+  craftingStatus?: string;
   worldId?: string;
   historyStatus?: string;
   historyBytes?: number;

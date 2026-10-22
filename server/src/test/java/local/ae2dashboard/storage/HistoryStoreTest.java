@@ -208,14 +208,15 @@ class HistoryStoreTest {
   void observationCountsOnlyLatestNonzeroExactResources() throws Exception {
     long t = 10 * History.DAY;
     try (var store = open()) {
-      assertEquals(new HistoryStore.Observation(0, 0), store.lastObservation("network"));
+      assertEquals(new HistoryStore.Observation(0, 0, 0), store.lastObservation("network"));
       store.append(sample(t, "s", "92233720368547758080"));
-      assertEquals(new HistoryStore.Observation(t, 1), store.lastObservation("network"));
+      assertEquals(new HistoryStore.Observation(t, 1, 0), store.lastObservation("network"));
       store.append(sample(t + 10000, "s", null));
-      assertEquals(new HistoryStore.Observation(t + 10000, 0), store.lastObservation("network"));
+      assertEquals(new HistoryStore.Observation(t + 10000, 0, 0), store.lastObservation("network"));
       store.append(sample(t + 20000, "s", "100"));
       store.append(sample(t + 100000, "next", null));
-      assertEquals(new HistoryStore.Observation(t + 100000, 0), store.lastObservation("network"));
+      assertEquals(
+          new HistoryStore.Observation(t + 100000, 0, 0), store.lastObservation("network"));
     }
   }
 

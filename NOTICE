@@ -5,5 +5,9 @@ Identity and catalogue collection code derives from AE2 Web Integration,
 Copyright (c) 2024 kuba6000 and contributors, LGPL-3.0-or-later.
 Source files and revision are listed in docs/provenance.json.
 
+Crafting preview, submission and lifecycle integration adapt the AE2 Web
+Integration workflow for the Dashboard's independent network and order storage.
+The original attribution and LGPL-3.0-or-later license remain applicable.
+
 This project is not an official Applied Energistics, Minecraft or Forge product.
 Bundled third-party software and generated asset packs retain their own licenses.

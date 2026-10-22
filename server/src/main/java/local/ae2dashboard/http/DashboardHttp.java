@@ -80,7 +80,26 @@ public final class DashboardHttp implements AutoCloseable {
         return;
       }
       String method = exchange.getRequestMethod();
-      if (!path.equals("/api/v1/session") && !Set.of("GET", "HEAD").contains(method)) {
+      String[] parts = path.split("/");
+      boolean craftingPath =
+          parts.length >= 7
+              && parts[1].equals("api")
+              && parts[2].equals("v1")
+              && parts[3].equals("networks")
+              && parts[5].equals("crafting");
+      boolean craftingWrite =
+          craftingPath
+              && (parts.length == 7
+                      && Set.of("plans", "orders").contains(parts[6])
+                      && method.equals("POST")
+                  || parts.length == 8 && parts[6].equals("plans") && method.equals("DELETE")
+                  || parts.length == 9
+                      && parts[6].equals("orders")
+                      && parts[8].equals("cancel")
+                      && method.equals("POST"));
+      if (!path.equals("/api/v1/session")
+          && !Set.of("GET", "HEAD").contains(method)
+          && !craftingWrite) {
         exchange.getResponseHeaders().set("Allow", "GET, HEAD");
         error(exchange, 405, "READ_ONLY");
         return;
@@ -95,6 +114,8 @@ public final class DashboardHttp implements AutoCloseable {
         if (authorized) {
           response.putAll(service.status());
           response.put("sampleIntervalSeconds", config.sampleIntervalSeconds());
+          response.put("craftingEnabled", config.craftingEnabled());
+          response.put("craftingStatus", service.crafting().status());
         }
         json(exchange, 200, response);
         return;
@@ -122,6 +143,7 @@ public final class DashboardHttp implements AutoCloseable {
                       row.put("createdAt", n.createdAt());
                       row.put("anchors", n.anchors());
                       row.put("nonZeroResources", service.nonZeroResources(n.id()));
+                      row.put("craftableResources", service.craftableResources(n.id()));
                       row.put("observedAt", service.observedAt(n.id()));
                       return row;
                     })
@@ -159,7 +181,15 @@ public final class DashboardHttp implements AutoCloseable {
                 service.store().resources(offset, limit).stream().map(this::resource).toList()));
         return;
       }
-      String[] parts = path.split("/");
+      if (craftingPath) {
+        String id = UUID.fromString(parts[4]).toString();
+        if (service.networks().stream().noneMatch(n -> n.id().equals(id))) {
+          error(exchange, 404, "NETWORK_NOT_FOUND");
+          return;
+        }
+        crafting(exchange, id, parts, query, craftingWrite);
+        return;
+      }
       if (parts.length == 6 && parts[3].equals("networks")) {
         String id = UUID.fromString(parts[4]).toString();
         Network network =
@@ -239,6 +269,8 @@ public final class DashboardHttp implements AutoCloseable {
         return;
       }
       error(exchange, 404, "NOT_FOUND");
+    } catch (Crafting.Failure e) {
+      safeError(exchange, craftingStatus(e.code()), e.code());
     } catch (History.SnapshotChanged e) {
       safeError(exchange, 409, "SNAPSHOT_CHANGED");
     } catch (History.InvalidGranularity e) {
@@ -257,6 +289,146 @@ public final class DashboardHttp implements AutoCloseable {
     } finally {
       exchange.close();
     }
+  }
+
+  private void crafting(
+      HttpExchange exchange,
+      String network,
+      String[] parts,
+      Map<String, String> query,
+      boolean write)
+      throws Exception {
+    String method = exchange.getRequestMethod();
+    JsonObject input = new JsonObject();
+    if (write) {
+      if (!sameOrigin(exchange)) throw new Crafting.Failure("ORIGIN_REJECTED");
+      byte[] body = exchange.getRequestBody().readNBytes(4097);
+      if (body.length > 4096) throw new Crafting.Failure("REQUEST_TOO_LARGE");
+      String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+      if (contentType == null
+          || !contentType.split(";", 2)[0].trim().equalsIgnoreCase("application/json"))
+        throw new Crafting.Failure("UNSUPPORTED_MEDIA_TYPE");
+      if (body.length > 0 || method.equals("POST")) {
+        try {
+          input =
+              JsonParser.parseString(new String(body, StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (RuntimeException e) {
+          throw new Crafting.Failure("INVALID_REQUEST");
+        }
+      }
+    }
+    CraftingService crafting = service.crafting();
+    if (parts.length == 7) {
+      switch (parts[6]) {
+        case "cpus" -> json(exchange, 200, Map.of("cpus", await(crafting.cpus(network))));
+        case "plans" -> {
+          if (!method.equals("POST")) {
+            methodNotAllowed(exchange, "POST");
+            return;
+          }
+          json(
+              exchange,
+              202,
+              await(
+                  crafting.createPlan(
+                      network,
+                      string(input, "resourceId", false),
+                      string(input, "quantity", false))));
+        }
+        case "orders" -> {
+          if (method.equals("POST")) {
+            json(
+                exchange,
+                202,
+                await(
+                    crafting.submit(
+                        network,
+                        string(input, "planId", false),
+                        string(input, "cpuId", true),
+                        string(input, "requestId", false))));
+          } else if (query.containsKey("requestId")) {
+            json(exchange, 200, crafting.byRequest(network, query.get("requestId")));
+          } else {
+            String history = query.getOrDefault("history", "false");
+            if (!Set.of("true", "false").contains(history))
+              throw new Crafting.Failure("INVALID_PARAMETER");
+            json(
+                exchange,
+                200,
+                crafting.orders(
+                    network,
+                    Boolean.parseBoolean(history),
+                    integer(query, "limit", 50, 1, 100),
+                    query.getOrDefault("cursor", "")));
+          }
+        }
+        default -> error(exchange, 404, "NOT_FOUND");
+      }
+    } else if (parts.length == 8 && parts[6].equals("plans")) {
+      if (method.equals("DELETE")) {
+        await(crafting.cancelPlan(network, parts[7]));
+        json(exchange, 200, Map.of("cancelled", true));
+      } else json(exchange, 200, await(crafting.plan(network, parts[7])));
+    } else if (parts.length == 8 && parts[6].equals("orders")) {
+      json(exchange, 200, crafting.order(network, parts[7]));
+    } else if (parts.length == 9 && parts[6].equals("orders") && parts[8].equals("cancel")) {
+      if (!method.equals("POST")) {
+        methodNotAllowed(exchange, "POST");
+        return;
+      }
+      json(exchange, 200, await(crafting.cancel(network, parts[7])));
+    } else error(exchange, 404, "NOT_FOUND");
+  }
+
+  private void methodNotAllowed(HttpExchange exchange, String allow) throws IOException {
+    exchange.getResponseHeaders().set("Allow", allow);
+    error(exchange, 405, "METHOD_NOT_ALLOWED");
+  }
+
+  private static String string(JsonObject input, String key, boolean optional) {
+    JsonElement value = input.get(key);
+    if (value == null && optional) return "";
+    if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString())
+      throw new Crafting.Failure("INVALID_REQUEST");
+    return value.getAsString();
+  }
+
+  private static <T> T await(CompletableFuture<T> future) throws InterruptedException {
+    try {
+      return future.get(10, TimeUnit.SECONDS);
+    } catch (TimeoutException e) {
+      // HTTP 等待结束不撤回已保存的订单意图，调用方使用 requestId 查询结果。
+      throw new Crafting.Failure("REQUEST_PENDING");
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      while (cause instanceof CompletionException && cause.getCause() != null)
+        cause = cause.getCause();
+      if (cause instanceof Crafting.Failure failure) throw failure;
+      throw new Crafting.Failure("CRAFTING_STORAGE_UNAVAILABLE");
+    }
+  }
+
+  private static int craftingStatus(String code) {
+    return switch (code) {
+      case "CRAFTING_DISABLED", "ORIGIN_REJECTED" -> 403;
+      case "PLAN_NOT_FOUND", "ORDER_NOT_FOUND", "NETWORK_NOT_FOUND", "RESOURCE_NOT_FOUND" -> 404;
+      case "REQUEST_TOO_LARGE" -> 413;
+      case "UNSUPPORTED_MEDIA_TYPE" -> 415;
+      case "CRAFTING_BUSY" -> 429;
+      case "CRAFTING_UNAVAILABLE",
+          "CRAFTING_INITIALIZING",
+          "CRAFTING_STORAGE_UNAVAILABLE",
+          "REQUEST_PENDING",
+          "CRAFTING_FAILED" ->
+          503;
+      case "INVALID_PARAMETER",
+          "INVALID_REQUEST",
+          "INVALID_RESOURCE",
+          "INVALID_QUANTITY",
+          "INVALID_CPU" ->
+          400;
+      default -> 409;
+    };
   }
 
   private void inventory(
@@ -280,6 +452,8 @@ public final class DashboardHttp implements AutoCloseable {
       for (var value : stored.rows()) {
         var row = resource(value.resource());
         row.put("quantity", value.quantity().toString());
+        row.put("craftable", value.craftable());
+        row.put("infinite", value.infinite());
         row.put("delta", null);
         row.put("rate", null);
         row.put("variantCount", grouped ? -1 : 1);
@@ -327,6 +501,7 @@ public final class DashboardHttp implements AutoCloseable {
           values.values().stream()
               .filter(v -> v.resource().id().startsWith("group:") == merge)
               .filter(v -> group.isEmpty() || v.resource().groupId().equals(group))
+              .filter(v -> zeros || v.quantity().signum() != 0 || v.craftable())
               .sorted(Comparator.comparing(v -> v.resource().id()))
               .toList();
       if (sorted.size() > 200000)
@@ -371,6 +546,8 @@ public final class DashboardHttp implements AutoCloseable {
         rows.subList(Math.min(offset, rows.size()), Math.min(offset + limit, rows.size()))) {
       Map<String, Object> row = resource(value.resource());
       row.put("quantity", value.quantity().toString());
+      row.put("craftable", value.craftable());
+      row.put("infinite", value.infinite());
       Resource.Stored prior = old == null ? null : old.values().get(value.resource().id());
       boolean continuous =
           old != null

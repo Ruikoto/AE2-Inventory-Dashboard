@@ -15,6 +15,7 @@ public final class DashboardService implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger("ae2dashboard");
   private final HistoryStore store;
   private final AssetPack assets;
+  private final CraftingService crafting;
   private final ThreadPoolExecutor writer =
       new ThreadPoolExecutor(
           1,
@@ -43,7 +44,7 @@ public final class DashboardService implements AutoCloseable {
 
   private final ConcurrentHashMap<String, Current> current = new ConcurrentHashMap<>();
 
-  private record Observation(long timestamp, long nonZeroResources) {}
+  private record Observation(long timestamp, long nonZeroResources, long craftableResources) {}
 
   private final ConcurrentHashMap<String, Observation> observations = new ConcurrentHashMap<>();
   private final Set<String> broken = ConcurrentHashMap.newKeySet();
@@ -61,6 +62,7 @@ public final class DashboardService implements AutoCloseable {
             config.sampleIntervalSeconds() * 1000L);
     for (Network n : store.networks()) networks.put(n.id(), n);
     assets = AssetPack.load(config.assetPack());
+    crafting = new CraftingService(this, config);
     // 后台恢复显示信息；只排一个任务，避免把历史网络数误算为丢样。
     writer.execute(
         () -> {
@@ -71,7 +73,10 @@ public final class DashboardService implements AutoCloseable {
               if (observation.timestamp() > 0)
                 observations.putIfAbsent(
                     network.id(),
-                    new Observation(observation.timestamp(), observation.nonZeroResources()));
+                    new Observation(
+                        observation.timestamp(),
+                        observation.nonZeroResources(),
+                        observation.craftableResources()));
             } catch (Exception e) {
               LOG.warn("Cannot restore network display metadata", e);
             }
@@ -85,6 +90,34 @@ public final class DashboardService implements AutoCloseable {
 
   public AssetPack assets() {
     return assets;
+  }
+
+  public CraftingService crafting() {
+    return crafting;
+  }
+
+  /** 在现有单写入线程执行订单持久化；排队失败必须由调用者处理。 */
+  public <T> CompletableFuture<T> write(Callable<T> task) {
+    var result = new CompletableFuture<T>();
+    if (closing) return CompletableFuture.failedFuture(new RejectedExecutionException("Closing"));
+    try {
+      writer.execute(new PendingWrite<>(task, result));
+    } catch (RejectedExecutionException e) {
+      result.completeExceptionally(e);
+    }
+    return result;
+  }
+
+  private record PendingWrite<T>(Callable<T> task, CompletableFuture<T> result)
+      implements Runnable {
+    @Override
+    public void run() {
+      try {
+        result.complete(task.call());
+      } catch (Exception e) {
+        result.completeExceptionally(e);
+      }
+    }
   }
 
   public Collection<Network> networks() {
@@ -113,6 +146,11 @@ public final class DashboardService implements AutoCloseable {
   public Long observedAt(String id) {
     var observed = observations.get(id);
     return observed == null ? null : observed.timestamp();
+  }
+
+  public Long craftableResources(String id) {
+    var observed = observations.get(id);
+    return observed == null ? null : observed.craftableResources();
   }
 
   public String worldId() {
@@ -169,6 +207,9 @@ public final class DashboardService implements AutoCloseable {
             snapshot.timestamp(),
             snapshot.values().values().stream()
                 .filter(v -> !v.resource().id().startsWith("group:") && v.quantity().signum() > 0)
+                .count(),
+            snapshot.values().values().stream()
+                .filter(v -> !v.resource().id().startsWith("group:") && v.craftable())
                 .count()));
     current.compute(
         snapshot.networkId(),
@@ -210,6 +251,7 @@ public final class DashboardService implements AutoCloseable {
             try {
               if (observed != null) store.saveNetwork(observed, null, Set.of());
               store.append(snapshot);
+              crafting.storageRecovered();
               writeStatus = store.status();
             } catch (Exception e) {
               broken.add(snapshot.networkId());
@@ -261,13 +303,21 @@ public final class DashboardService implements AutoCloseable {
 
   @Override
   public void close() {
+    crafting.close();
     closing = true;
     writer.shutdown();
+    List<Runnable> discarded = List.of();
     try {
-      if (!writer.awaitTermination(5, TimeUnit.SECONDS)) writer.shutdownNow();
+      if (!writer.awaitTermination(5, TimeUnit.SECONDS)) discarded = writer.shutdownNow();
     } catch (InterruptedException e) {
-      writer.shutdownNow();
+      discarded = writer.shutdownNow();
       Thread.currentThread().interrupt();
     }
+    // 超时或中断时，排队中的订单写入也必须触发失败回调。
+    for (Runnable task : discarded)
+      if (task instanceof PendingWrite<?> pending)
+        pending
+            .result()
+            .completeExceptionally(new RejectedExecutionException("Shutdown before write"));
   }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useDashboard } from "../viewmodels/dashboard";
+import { useCrafting } from "../viewmodels/crafting";
 import {
   historyReason,
   duration,
@@ -15,8 +16,12 @@ import {
 import ThemePicker from "./ThemePicker.vue";
 import BrandMark from "./BrandMark.vue";
 import InventoryTable from "./InventoryTable.vue";
+import InventoryGrid from "./InventoryGrid.vue";
+import CraftingDialog from "./CraftingDialog.vue";
+import CraftingOrders from "./CraftingOrders.vue";
 import TrendChart from "./TrendChart.vue";
 const vm = useDashboard();
+const crafting = useCrafting(vm.status, vm.networkId);
 const {
   status,
   networks,
@@ -129,12 +134,33 @@ const chartGroups = computed(() =>
         >
       </div>
       <ThemePicker />
+      <button
+        class="subtle orders-entry"
+        :disabled="!networkId"
+        @click="crafting.showOrders"
+      >
+        合成订单
+      </button>
       <button class="subtle" :disabled="busy" @click="vm.refresh">
         {{ busy ? "读取中" : "刷新" }}</button
       ><button class="subtle" @click="settings = !settings">设置</button>
     </header>
     <div v-if="error" role="alert" class="banner error-banner">
       {{ error }}<button @click="error = ''" aria-label="关闭">×</button>
+    </div>
+    <div v-if="crafting.notice.value" class="banner" role="status">
+      {{ crafting.notice.value
+      }}<button aria-label="关闭订单提示" @click="crafting.notice.value = ''">
+        ×
+      </button>
+    </div>
+    <div v-if="crafting.pendingRequest.value" class="banner">
+      有一笔提交尚未确认。<button
+        :disabled="crafting.submitting.value"
+        @click="crafting.reconcile"
+      >
+        查询订单结果</button
+      ><span v-if="crafting.error.value">{{ crafting.error.value }}</span>
     </div>
     <div v-if="inventory?.stale" class="banner">
       显示最后一次有效库存，曲线已在数据缺口处断开。
@@ -220,12 +246,31 @@ const chartGroups = computed(() =>
           v-model="preferences.onlyFavorites"
           type="checkbox"
         />仅收藏</label
-      ><select v-model="preferences.sort" aria-label="排序">
+      ><label class="check"
+        ><input
+          v-model="preferences.excludeInfinite"
+          type="checkbox"
+        />排除无限项</label
+      >
+      <select v-model="preferences.sort" aria-label="排序">
         <option value="quantity">库存降序</option>
         <option value="name">名称</option>
         <option value="delta">净变化降序</option>
         <option value="rate">净速率降序</option></select
       ><span class="resource-count">{{ totalRows.toLocaleString() }} 项</span>
+      <div class="view-switch" aria-label="库存视图">
+        <button
+          :aria-pressed="preferences.inventoryView === 'grid'"
+          @click="preferences.inventoryView = 'grid'"
+        >
+          网格</button
+        ><button
+          :aria-pressed="preferences.inventoryView === 'list'"
+          @click="preferences.inventoryView = 'list'"
+        >
+          列表
+        </button>
+      </div>
     </section>
     <section class="time-bar">
       <label
@@ -307,8 +352,13 @@ const chartGroups = computed(() =>
             显示空网络
           </button>
         </div>
-        <InventoryTable
+        <component
           v-else
+          :is="
+            preferences.inventoryView === 'grid'
+              ? InventoryGrid
+              : InventoryTable
+          "
           :rows="visibleRows"
           :total="totalRows"
           :start="windowStart"
@@ -318,9 +368,16 @@ const chartGroups = computed(() =>
           :comparisons="preferences.comparisons"
           :selected="selected"
           :buckets="preferences.buckets"
+          :can-craft="
+            !!crafting.enabled.value &&
+            currentNetwork?.status === 'online' &&
+            !inventory?.stale
+          "
+          :initial-index="vm.viewportIndex.value"
           @favorite="vm.toggleFavorite"
           @compare="vm.compare"
           @select="vm.select"
+          @craft="crafting.open"
         />
       </section>
       <section class="detail-panel">
@@ -475,7 +532,11 @@ const chartGroups = computed(() =>
             ? "区间统计暂不可用"
             : "正在计算所选范围的统计…"
       }}</span
-      ><span>只读</span>
+      ><span>{{
+        status.craftingEnabled ? "合成下单已开放" : "新订单已关闭"
+      }}</span>
     </footer>
+    <CraftingDialog :vm="crafting" />
+    <CraftingOrders :vm="crafting" />
   </main>
 </template>

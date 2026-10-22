@@ -44,7 +44,10 @@ public record Snapshot(
           group.id(),
           (id, old) ->
               new Resource.Stored(
-                  group, value.quantity().add(old == null ? BigInteger.ZERO : old.quantity())));
+                  group,
+                  value.quantity().add(old == null ? BigInteger.ZERO : old.quantity()),
+                  value.craftable() || old != null && old.craftable(),
+                  value.infinite() || old != null && old.infinite()));
     }
     return new Snapshot(networkId, segment, timestamp, version, result);
   }

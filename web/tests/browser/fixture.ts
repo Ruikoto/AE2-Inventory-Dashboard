@@ -15,6 +15,8 @@ export async function dashboardFixture(
     inventoryDelay?: number;
     statisticsDelay?: number;
     singleNetwork?: boolean;
+    capabilities?: boolean;
+    craftingEnabled?: boolean;
   } = {},
 ) {
   const count = options.count ?? 120;
@@ -44,7 +46,18 @@ export async function dashboardFixture(
         registryId,
         name: `${prefix}${fluid ? "水" : `物品 ${i}`}`,
         type: fluid ? "fluid" : "item",
-        quantity: i === 0 ? "9007199254740993" : String((total - i) * 1000),
+        quantity:
+          i === 0
+            ? "9007199254740993"
+            : options.capabilities && i === 1
+              ? "2147486591840"
+              : options.capabilities && i === 2
+                ? "0"
+                : options.capabilities && i === 3
+                  ? "2147483647"
+                  : String((total - i) * 1000),
+        craftable: !!options.capabilities && [0, 1, 2].includes(i),
+        infinite: !!options.capabilities && [1, 3].includes(i),
         unit: fluid ? "mB" : "个",
         amountPerUnit: fluid ? 1000 : 1,
         delta: "-120",
@@ -57,6 +70,8 @@ export async function dashboardFixture(
       json = {
         authenticated: true,
         authMode: "public",
+        craftingEnabled: options.craftingEnabled ?? false,
+        craftingStatus: "available",
         worldId: world,
         historyStatus: "recording",
         assets: { status: "missing", entries: 0 },
@@ -73,6 +88,8 @@ export async function dashboardFixture(
             lastSeen: now,
             anchors: ["minecraft:overworld 0,64,0"],
             nonZeroResources: i === 2 ? 0 : i === 3 ? null : count,
+            craftableResources:
+              i === 3 ? null : options.capabilities && i < 2 ? 3 : 0,
           })),
       };
     else if (url.pathname.endsWith("/inventory")) {

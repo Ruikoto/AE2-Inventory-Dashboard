@@ -1,5 +1,9 @@
 apply from: rootProject.file('gradle/forge-module.gradle')
 base { archivesName = 'ae2-inventory-dashboard' }
+mixin { config 'ae2dashboard.mixins.json' }
+tasks.named('jar') {
+    manifest.attributes('MixinConfigs': 'ae2dashboard.mixins.json')
+}
 repositories {
     ivy {
         name = 'SQLiteForgeRelease'

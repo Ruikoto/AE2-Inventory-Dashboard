@@ -4,6 +4,12 @@
   "license": "LGPL-3.0-or-later",
   "identityContract": "ae2wi-1.2.0-pre-forge-1.20.1",
   "releasedJarSha256": "50b7157d6db3081359fa8fa3d482ecaca5dd10fbe155197bbe5a1863f8dcebc5",
+  "craftingAdaptation": {
+    "sourceCommit": "b41f8a054387b332898b18855111067aa5a4120a",
+    "references": ["http/endpoint/crafting", "grid/CraftingPlanRegistry.java", "tracking/AE2JobTracker.java", "released Forge CraftingCPULogicMixin"],
+    "targetFiles": ["server/src/main/java/local/ae2dashboard/CraftingService.java", "server/src/main/java/local/ae2dashboard/forge/AeCrafting.java", "server/src/main/java/local/ae2dashboard/forge/mixin/CraftingCpuLogicMixin.java"],
+    "scope": "Adapted workflow and native lifecycle hooks; independent persistent shared orders and HTTP protocol"
+  },
   "files": [
     {
       "file": "ClientCommands.java",

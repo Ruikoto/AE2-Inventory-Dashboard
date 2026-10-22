@@ -4,11 +4,13 @@
 
 0.1.2 的后续确认以 [实施约定](UX_012_PLAN.md) 和 [协议](PROTOCOL.md) 为准：区间统计共用时间范围、缺数据取最新连续段、默认数量/速率双轴及 Worker 网页处理。最近交付和未完成实机验证见 [交接状态](HANDOFF.md)。
 
+0.1.3 的后续确认以 [网格与合成实施约定](CRAFTING_013_PLAN.md) 为准：新增同网络共享的手动合成订单及同源写接口、默认网格与来源识别的无限项。以下只读条款为原始基线，仅继续约束监测接口；本轮不提交、推送或部署。
+
 ## 固定要求
 
 - 独立仓库，main 分支，阶段提交；0.1.0 开始，未完成实测的构建使用开发版本，不自动发布。
 - contracts、server、client-exporter、web 四模块；Java 17，Forge 47.4.16，AE2 15.4.10。
-- 默认 0.0.0.0:18766，自动生成 32 字节主密码，可显式开启 public；网页只读，同源会话。
+- 默认 0.0.0.0:18766，自动生成 32 字节主密码，可显式开启 public；监测只读，同源会话，合成按 0.1.3 明确路由开放。
 - 主线程发现有真正 ME 控制器的已加载网络，错峰每 10 秒读取完整库存；后台单写入 SQLite。不上区块票，不读取未加载世界。
 - 持久 UUID、控制器锚点批量匹配、拆分合并事件；断电、卸载、重组、重启和丢样切断连续段。
 - 数量精确字符串和 BigInteger/BigInt；精确 NBT 身份共享旧工具算法，分组按类型与注册 ID。合并序列在同一份采样计算。
@@ -25,7 +27,7 @@
 ## API
 
 `/api/v1/status`、`/session`、`/networks`、`/networks/{id}/inventory`、`/history`、`/statistics`、`/events`、`/resources`、`/assets/manifest`、`/assets/{hash}.png`。
-仅 session 接受 POST/DELETE，其余 GET/HEAD。库存、历史、资源映射遵循认证；无原始 NBT、游戏操作、配置写入接口。
+session 及 0.1.3 指定的 crafting 路由接受 POST/DELETE，其余 GET/HEAD。库存、历史、资源映射和合成遵循认证；无原始 NBT 或配置写入接口。
 
 ## 实施顺序
 

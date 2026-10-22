@@ -6,6 +6,19 @@ import {
 } from "../src/models/preferences";
 import { decimalOrder } from "../src/models/format";
 afterEach(() => vi.unstubAllGlobals());
+it("defaults to grid and restores only valid infinity and view preferences", () => {
+  expect(defaults().inventoryView).toBe("grid");
+  expect(defaults().excludeInfinite).toBe(false);
+  expect(
+    loadPreferences("key", '{"inventoryView":"list","excludeInfinite":true}'),
+  ).toMatchObject({ inventoryView: "list", excludeInfinite: true });
+  expect(
+    loadPreferences(
+      "key",
+      '{"inventoryView":"anything","excludeInfinite":"true"}',
+    ),
+  ).toMatchObject({ inventoryView: "grid", excludeInfinite: false });
+});
 it("recovers corrupted preferences and rejects wrong field types", () => {
   vi.stubGlobal("localStorage", {
     getItem: () =>

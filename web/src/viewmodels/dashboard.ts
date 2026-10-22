@@ -55,7 +55,10 @@ export function useDashboard() {
     statisticsReady = ref(false);
   const networks = computed(() =>
     allNetworks.value.filter(
-      (n) => showEmptyNetworks.value || n.nonZeroResources !== 0,
+      (n) =>
+        showEmptyNetworks.value ||
+        n.nonZeroResources !== 0 ||
+        n.craftableResources !== 0,
     ),
   );
   const hiddenNetworks = computed(
@@ -138,8 +141,15 @@ export function useDashboard() {
       resetScroll: reset,
     });
   }
-  function setWindow(start: number, count: number) {
-    worker?.postMessage({ type: "window", start, count });
+  const viewportIndex = ref(0);
+  function setWindow(
+    start: number,
+    count: number,
+    columns = 1,
+    firstVisible = start,
+  ) {
+    viewportIndex.value = firstVisible;
+    worker?.postMessage({ type: "window", start, count, columns });
   }
   function cancel() {
     generation++;
@@ -466,6 +476,7 @@ export function useDashboard() {
       preferences.type,
       preferences.namespace,
       preferences.onlyFavorites,
+      preferences.excludeInfinite,
       preferences.sort,
       preferences.favorites.join("\0"),
     ],
@@ -605,6 +616,7 @@ export function useDashboard() {
     showEmptyNetworks,
     hiddenNetworks,
     setWindow,
+    viewportIndex,
     statisticsReady,
   };
 }

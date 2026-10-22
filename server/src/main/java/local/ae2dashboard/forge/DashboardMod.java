@@ -23,6 +23,7 @@ public final class DashboardMod {
   private DashboardService service;
   private DashboardHttp http;
   private AeSampler sampler;
+  private AeCrafting crafting;
   private Path world;
 
   public DashboardMod() {
@@ -40,6 +41,8 @@ public final class DashboardMod {
       world = event.getServer().getWorldPath(LevelResource.ROOT);
       service = new DashboardService(world, config);
       sampler = new AeSampler(service, config.sampleIntervalSeconds());
+      crafting = new AeCrafting(service, sampler, event.getServer());
+      service.crafting().setBackend(crafting);
       try {
         http = new DashboardHttp(service, config);
         http.start();
@@ -55,13 +58,18 @@ public final class DashboardMod {
   }
 
   private void tick(TickEvent.ServerTickEvent event) {
-    if (event.phase == TickEvent.Phase.END && sampler != null) sampler.tick();
+    if (event.phase == TickEvent.Phase.END && sampler != null) {
+      sampler.tick();
+      crafting.tick();
+    }
   }
 
   private void stop(ServerStoppingEvent event) {
     sampler = null;
     if (http != null) http.close();
+    if (crafting != null) crafting.close();
     if (service != null) service.close();
+    crafting = null;
     http = null;
     service = null;
     MonitoringGridService.reset();

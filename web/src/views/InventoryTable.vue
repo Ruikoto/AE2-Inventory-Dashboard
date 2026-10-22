@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import type { Resource } from "../models/types";
-import { quantity, signed, rate, statisticsLabel } from "../models/format";
+import {
+  inventoryQuantity,
+  signed,
+  rate,
+  statisticsLabel,
+} from "../models/format";
 import ResourceIcon from "./ResourceIcon.vue";
 const props = defineProps<{
   rows: Resource[];
@@ -12,12 +17,15 @@ const props = defineProps<{
   comparisons: string[];
   selected: string;
   buckets: boolean;
+  canCraft: boolean;
+  initialIndex: number;
 }>();
 const emit = defineEmits<{
   favorite: [id: string];
   compare: [id: string];
   select: [row: Resource];
-  window: [start: number, count: number];
+  craft: [row: Resource];
+  window: [start: number, count: number, columns: number, firstVisible: number];
 }>();
 const ROW_HEIGHT = 64;
 const viewport = ref<HTMLElement>();
@@ -32,6 +40,8 @@ function updateWindow() {
       "window",
       Math.max(0, Math.floor(el.scrollTop / ROW_HEIGHT) - 8),
       Math.ceil(el.clientHeight / ROW_HEIGHT) + 16,
+      1,
+      Math.floor(el.scrollTop / ROW_HEIGHT),
     );
   });
 }
@@ -44,6 +54,7 @@ watch(
 );
 watch(() => props.total, updateWindow);
 onMounted(() => {
+  viewport.value!.scrollTop = props.initialIndex * ROW_HEIGHT;
   observer = new ResizeObserver(updateWindow);
   observer.observe(viewport.value!);
   updateWindow();
@@ -57,7 +68,8 @@ onUnmounted(() => {
   <div class="inventory-head" role="row">
     <span></span><span>物品 / 流体</span><span>库存</span
     ><span title="所选范围内最近连续段的净变化">区间净变化</span
-    ><span title="所选范围内最近连续段的平均净速率">平均净速率</span>
+    ><span title="所选范围内最近连续段的平均净速率">平均净速率</span
+    ><span>操作</span>
   </div>
   <div
     ref="viewport"
@@ -77,6 +89,7 @@ onUnmounted(() => {
           :key="row.id"
           role="row"
           class="inventory-row"
+          :data-resource-id="row.id"
           :class="{ selected: selected === row.id }"
           :aria-selected="selected === row.id"
           @click="emit('select', row)"
@@ -107,11 +120,9 @@ onUnmounted(() => {
               ></span
             >
           </button>
-          <span
-            class="numeric"
-            :title="quantity(row.quantity, row.unit, buckets)"
-            >{{ quantity(row.quantity, row.unit, buckets) }}</span
-          >
+          <span class="numeric" :title="inventoryQuantity(row, buckets)">{{
+            inventoryQuantity(row, buckets)
+          }}</span>
           <span
             class="numeric change"
             :title="statisticsLabel(row)"
@@ -135,6 +146,16 @@ onUnmounted(() => {
               :aria-label="`对比 ${row.name}`"
               @change="emit('compare', row.id)"
           /></span>
+          <span class="craft-cell"
+            ><button
+              v-if="row.craftable && canCraft"
+              class="craft-button"
+              :aria-label="`下单 ${row.name}`"
+              @click.stop="emit('craft', row)"
+            >
+              下单
+            </button></span
+          >
         </div>
       </div>
     </div>

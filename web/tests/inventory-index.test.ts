@@ -21,6 +21,49 @@ const row = (
   variantCount: 1,
 });
 describe("inventory index", () => {
+  it("filters only proven infinite sources and keeps zero-stock craftables", () => {
+    const infinite = {
+      ...row("water", "2147486591840"),
+      type: "fluid",
+      unit: "mB",
+      infinite: true,
+    };
+    const index = new InventoryIndex([
+      infinite,
+      row("huge", "9007199254740993"),
+      { ...row("craft", "0"), craftable: true },
+      row("zero", "0"),
+    ]);
+    expect(index.filter(defaults()).map((value) => value.id)).toEqual([
+      "huge",
+      "water",
+      "craft",
+    ]);
+    expect(
+      index
+        .filter({ ...defaults(), excludeInfinite: true })
+        .map((value) => value.id),
+    ).toEqual(["huge", "craft"]);
+    expect(
+      index
+        .filter({
+          ...defaults(),
+          excludeInfinite: true,
+          onlyFavorites: true,
+          favorites: ["water", "craft"],
+        })
+        .map((value) => value.id),
+    ).toEqual(["craft"]);
+    expect(
+      index.filter({ ...defaults(), excludeInfinite: true, type: "fluid" }),
+    ).toEqual([]);
+    const grouped = new InventoryIndex([
+      { ...row("group:item:test:one", "9007199254740993"), infinite: true },
+    ]);
+    expect(
+      grouped.filter({ ...defaults(), merged: true, excludeInfinite: true }),
+    ).toEqual([]);
+  });
   it("sorts exact huge quantities, rates and unavailable statistics", () => {
     const index = new InventoryIndex([
       row("lower", "9007199254740992", "9007199254740992.999999"),

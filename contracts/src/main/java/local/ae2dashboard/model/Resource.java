@@ -40,7 +40,12 @@ public record Resource(
                 + groupId.length());
   }
 
-  public record Stored(Resource resource, BigInteger quantity) {
+  public record Stored(
+      Resource resource, BigInteger quantity, boolean craftable, boolean infinite) {
+    public Stored(Resource resource, BigInteger quantity) {
+      this(resource, quantity, false, false);
+    }
+
     public Stored {
       Objects.requireNonNull(resource);
       if (quantity.signum() < 0) throw new IllegalArgumentException("Negative inventory");
