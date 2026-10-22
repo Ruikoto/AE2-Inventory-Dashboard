@@ -64,3 +64,7 @@ Tetra/Radium既有兼容警告34次、AE2回调预算警告1次单独记录，�
 服务端安装文件：`server/build/libs/ae2-inventory-dashboard-0.1.3-dev-server.jar`（10,159,598字节）。不得将 `-dev.jar` 当成安装包。最终JAR已确认Implementation-Version=0.1.3-dev、MixinConfigs注册、JAVA_17 Mixin配置/类及最终网页 `index-CECJugEW.js`；客户端导出器安装包仅随完整构建产生。
 
 本轮不运行要求已提交来源的发行打包流程，不生成虚假的提交来源清单。源码和验证记录保留在任务分支工作区；生产升级另行授权。
+
+### 后续交付授权
+
+上述段落记录实现阶段边界。2026-10-22用户随后明确要求提交、上传，并移除服务端AE2-Web-Integration。功能提交为 `072ef8d5e699a66b61051634133b4b809cfe862f`，提交后执行package.ps1，生成来源清单且workingTreeDirty=false、schemaVersion=2。服务端JAR上传前后SHA-256一致，旧两个JAR与一致性数据库备份均保留在mods外；未推送，也未执行服务器重启。部署状态和指纹见 [交接记录](HANDOFF.md)。后续文档提交不改变该JAR的源码来源，不重新标注旧产物。
