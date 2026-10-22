@@ -2,6 +2,8 @@
 
 本项目执行用户确认的两份计划。原始完整计划保存在 [ORIGINAL_PLAN.md](ORIGINAL_PLAN.md)，本文记录后续补充和实施边界；发生冲突时以用户后续明确决定为准。
 
+0.1.2 的后续确认以 [实施约定](UX_012_PLAN.md) 和 [协议](PROTOCOL.md) 为准：区间统计共用时间范围、缺数据取最新连续段、默认数量/速率双轴及 Worker 网页处理。最近交付和未完成实机验证见 [交接状态](HANDOFF.md)。
+
 ## 固定要求
 
 - 独立仓库，main 分支，阶段提交；0.1.0 开始，未完成实测的构建使用开发版本，不自动发布。
@@ -22,7 +24,7 @@
 
 ## API
 
-`/api/v1/status`、`/session`、`/networks`、`/networks/{id}/inventory`、`/history`、`/events`、`/resources`、`/assets/manifest`、`/assets/{hash}.png`。
+`/api/v1/status`、`/session`、`/networks`、`/networks/{id}/inventory`、`/history`、`/statistics`、`/events`、`/resources`、`/assets/manifest`、`/assets/{hash}.png`。
 仅 session 接受 POST/DELETE，其余 GET/HEAD。库存、历史、资源映射遵循认证；无原始 NBT、游戏操作、配置写入接口。
 
 ## 实施顺序
