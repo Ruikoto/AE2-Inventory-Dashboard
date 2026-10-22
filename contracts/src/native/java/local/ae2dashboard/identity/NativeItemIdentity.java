@@ -15,10 +15,15 @@ public final class NativeItemIdentity {
   public static @NotNull StableKey getKey(@NotNull AEKey key) {
     CompoundTag tag = key.toTagGeneric();
     // The native codec allocates its tag first. Bounds cover only the subsequent traversal.
+    return fromTag(kind(key), key.getId().toString(), tag);
+  }
+
+  /** 共用原生编码散列；传入标签只读且由调用方拥有。 */
+  static StableKey fromTag(String kind, String registryId, CompoundTag tag) {
     return StableKey.create(
         sink -> {
-          StableKey.writeText(sink, kind(key));
-          StableKey.writeText(sink, key.getId().toString());
+          StableKey.writeText(sink, kind);
+          StableKey.writeText(sink, registryId);
           sink.putInt(0);
           sink.putByte((byte) 1);
           CanonicalNbt.write(tag, sink);

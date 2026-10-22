@@ -10,6 +10,20 @@
     "targetFiles": ["server/src/main/java/local/ae2dashboard/CraftingService.java", "server/src/main/java/local/ae2dashboard/forge/AeCrafting.java", "server/src/main/java/local/ae2dashboard/forge/mixin/CraftingCpuLogicMixin.java"],
     "scope": "Adapted workflow and native lifecycle hooks; independent persistent shared orders and HTTP protocol"
   },
+  "craftingStatus014": {
+    "sourceRepository": "https://github.com/AppliedEnergistics/Applied-Energistics-2",
+    "sourceVersion": "15.4.10",
+    "authors": "TeamAppliedEnergistics",
+    "references": ["CraftConfirmTableRenderer", "CraftingStatusTableRenderer", "CraftingCpuLogic", "ElapsedTimeTracker", "assets/ae2/screens/crafting_status.json"],
+    "scope": "Reference native API, material status semantics, screen organization and workload ETA; no upstream runtime or artwork copied into the repository"
+  },
+  "qualityFoodDisplay014": {
+    "sourceVersion": "quality_food-1.20.1-2.3.0",
+    "authors": "Cadentem",
+    "license": "MIT",
+    "references": ["QualityUtils", "GuiGraphicsMixin", "quality_food quality/effects NBT", "iron_overlay/gold_overlay/diamond_overlay registry items"],
+    "scope": "Read-only compatibility investigation; derive a display base identity and reuse user-exported overlay assets, without copying mod code or assets"
+  },
   "files": [
     {
       "file": "ClientCommands.java",

@@ -2,7 +2,7 @@ import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { dashboardFixture, networks } from "./fixture";
 import type { CraftingOrder, CraftingPlan } from "../../src/models/crafting";
 
-async function craftingFixture(
+export async function craftingFixture(
   context: BrowserContext,
   options: {
     enabled?: boolean;
@@ -12,10 +12,12 @@ async function craftingFixture(
     calculating?: boolean;
     cancelFailure?: boolean;
     failIntent?: boolean;
+    presentation?: Record<string, unknown>;
   } = {},
 ) {
   await dashboardFixture(context, {
     count: 8,
+    presentation: options.presentation,
     capabilities: true,
     craftingEnabled: options.enabled ?? true,
   });
@@ -27,6 +29,19 @@ async function craftingFixture(
     cancelled: 0,
     polls: 0,
     requestPending: false,
+    cpuMode: "available" as
+      "available" | "none" | "busy" | "small" | "manual" | "error",
+    statusFailure: false,
+    external: false,
+    crossNetwork: false,
+    materialCount: 1,
+    completedWork: "25",
+    sampledAt: 0,
+    taskId: "native-1",
+    statusCalls: 0,
+    statusChangedOnce: false,
+    materialName: "加工材料",
+    deleteFailure: false,
   };
   await context.route("**/api/v1/networks/*/crafting/**", async (route) => {
     const request = route.request(),
@@ -34,29 +49,159 @@ async function craftingFixture(
     const parts = url.pathname.split("/"),
       networkId = parts[4];
     const action = parts.slice(6).join("/");
-    if (action === "cpus")
+    const running = state.orders.find(
+      (order) => order.networkId === networkId && order.state === "running",
+    );
+    if (action === "cpus") {
+      if (state.cpuMode === "error")
+        return route.fulfill({
+          status: 503,
+          json: { error: "CRAFTING_QUEUE_BUSY" },
+        });
+      const common = {
+        taskId: "",
+        outputQuantity: "0",
+        totalWork: "0",
+        completedWork: "0",
+        elapsedNanos: "0",
+        dashboardOrderId: "",
+        canCancel: false,
+        autoSelectable: state.cpuMode !== "manual",
+      };
       return route.fulfill({
         json: {
-          cpus: [
-            {
-              id: "cpu-1",
-              name: "主合成 CPU",
-              storage: "65536",
-              coprocessors: 4,
-              busy: false,
-              selectable: true,
-            },
-            {
-              id: "cpu-small",
-              name: "小型 CPU",
-              storage: "1",
-              coprocessors: 0,
-              busy: false,
-              selectable: true,
-            },
-          ],
+          cpus:
+            state.cpuMode === "none"
+              ? []
+              : [
+                  {
+                    ...common,
+                    id: "cpu-1",
+                    name: "主合成 CPU",
+                    storage: state.cpuMode === "small" ? "1" : "65536",
+                    coprocessors: 4,
+                    busy: !!running || state.cpuMode === "busy",
+                    selectable: !running && state.cpuMode !== "busy",
+                    ...(running
+                      ? {
+                          taskId: state.taskId,
+                          output: running.item,
+                          outputQuantity: running.quantity,
+                          totalWork: "100",
+                          completedWork: state.completedWork,
+                          elapsedNanos: "10000000000",
+                          dashboardOrderId: running.id,
+                          canCancel: true,
+                        }
+                      : {}),
+                  },
+                  {
+                    ...common,
+                    id: "cpu-small",
+                    name: "小型 CPU",
+                    storage: "1",
+                    coprocessors: 0,
+                    busy: state.cpuMode === "busy",
+                    selectable: state.cpuMode !== "busy",
+                  },
+                  ...(state.external
+                    ? [
+                        {
+                          ...common,
+                          id: "cpu-external",
+                          name: "外部合成 CPU",
+                          storage: "65536",
+                          coprocessors: 2,
+                          busy: true,
+                          selectable: false,
+                          taskId: "external-task",
+                          dashboardOrderId: state.crossNetwork
+                            ? "foreign-order"
+                            : "",
+                          output: {
+                            id: "external",
+                            name: "游戏中的任务",
+                            type: "item",
+                            unit: "个",
+                            registryId: "minecraft:iron_ingot",
+                          },
+                          outputQuantity: "20",
+                          totalWork: "100",
+                          completedWork: state.completedWork,
+                          elapsedNanos: "10000000000",
+                        },
+                      ]
+                    : []),
+                ],
         },
       });
+    }
+    if (action === "cpus/status") {
+      state.statusCalls++;
+      if (state.statusChangedOnce && url.searchParams.has("version")) {
+        state.statusChangedOnce = false;
+        return route.fulfill({
+          status: 409,
+          json: { error: "STATUS_CHANGED" },
+        });
+      }
+      if (state.statusFailure)
+        return route.fulfill({
+          status: 503,
+          json: { error: "CRAFTING_QUEUE_BUSY" },
+        });
+      const cpuId = url.searchParams.get("cpuId"),
+        taskId =
+          cpuId === "cpu-external"
+            ? "external-task"
+            : running
+              ? state.taskId
+              : "";
+      if (url.searchParams.get("taskId") !== taskId)
+        return route.fulfill({ status: 409, json: { error: "TASK_CHANGED" } });
+      const offset = Number(url.searchParams.get("offset") ?? 0),
+        count = taskId ? state.materialCount : 0;
+      return route.fulfill({
+        json: {
+          cpuId,
+          taskId,
+          version: 1,
+          sampledAt: state.sampledAt || Date.now(),
+          state: taskId ? "running" : "idle",
+          cantStoreItems: false,
+          totalWork: taskId ? "100" : "0",
+          completedWork: taskId ? state.completedWork : "0",
+          elapsedNanos: "10000000000",
+          offset,
+          total: count,
+          detailsAvailable: true,
+          error: "",
+          entries: Array.from(
+            {
+              length: Math.max(
+                0,
+                Math.min(
+                  Number(url.searchParams.get("limit") ?? 120),
+                  count - offset,
+                ),
+              ),
+            },
+            (_, i) => ({
+              item: {
+                id: "material-" + (offset + i),
+                name: state.materialName + " " + (offset + i),
+                unit: "个",
+                type: "item",
+                registryId: "minecraft:iron_ingot",
+              },
+              stored: "12",
+              active: "4",
+              pending: "8",
+            }),
+          ),
+        },
+      });
+    }
     if (action === "plans" && request.method() === "POST") {
       const input = request.postDataJSON();
       const item = {
@@ -70,6 +215,7 @@ async function craftingFixture(
         unit: input.resourceId === "resource-1" ? "mB" : "个",
         type: input.resourceId === "resource-1" ? "fluid" : "item",
         registryId: "minecraft:test",
+        ...options.presentation,
       };
       const plan: CraftingPlan = {
         id: `plan-${state.plans.size + 1}`,
@@ -99,6 +245,11 @@ async function craftingFixture(
     }
     if (action.startsWith("plans/") && request.method() === "DELETE") {
       state.deletes++;
+      if (state.deleteFailure)
+        return route.fulfill({
+          status: 503,
+          json: { error: "CRAFTING_QUEUE_BUSY" },
+        });
       return route.fulfill({ json: { cancelled: true } });
     }
     if (action.startsWith("plans/") && request.method() === "GET") {
@@ -175,12 +326,16 @@ async function craftingFixture(
         },
       });
     }
+    if (action.startsWith("orders/")) {
+      const order = state.orders.find((order) => order.id === parts[7]);
+      if (order) return route.fulfill({ json: order });
+    }
     return route.fulfill({ status: 404, json: { error: "ORDER_NOT_FOUND" } });
   });
   return state;
 }
 
-async function ready(page: Page, url = "/") {
+export async function ready(page: Page, url = "/") {
   await page.goto(url);
   await expect(page.locator(".inventory-card").first()).toBeVisible();
   await expect(
@@ -188,7 +343,7 @@ async function ready(page: Page, url = "/") {
   ).toBeEnabled();
   await expect(page.locator(".resource-stats")).toContainText("+18,000");
 }
-async function preview(page: Page) {
+export async function preview(page: Page) {
   await page
     .getByRole("button", { name: "下单 甲物品 0", exact: true })
     .click();
@@ -572,7 +727,221 @@ for (const width of [1440, 1024, 390])
           () => document.documentElement.scrollWidth <= innerWidth,
         ),
       ).toBe(true);
+      await page.getByRole("button", { name: "确认下单", exact: true }).click();
+      await expect(page.locator(".cpu-workspace")).toBeVisible();
+      await expect(page.locator(".material-cell").first()).toBeVisible();
+      await page.screenshot({
+        path: info.outputPath(`cpu-${theme}-${width}.png`),
+        fullPage: true,
+      });
       await page.keyboard.press("Escape");
       await expect(page.locator("dialog[open]")).toHaveCount(0);
     });
   }
+
+for (const [mode, message] of [
+  ["none", "网络中没有合成 CPU"],
+  ["busy", "没有空闲且在线"],
+  ["small", "存储空间不足"],
+  ["manual", "请手动选择"],
+  ["error", "CPU 状态未确认"],
+] as const) {
+  test("CPU eligibility blocks " + mode, async ({ page }) => {
+    const state = await craftingFixture(page.context());
+    state.cpuMode = mode;
+    await ready(page);
+    await preview(page);
+    await expect(
+      page.getByRole("button", { name: "确认下单", exact: true }),
+    ).toBeDisabled();
+    await expect(page.locator(".cpu-problem")).toContainText(message);
+    if (mode === "error") {
+      state.cpuMode = "available";
+      await expect(
+        page.getByRole("button", { name: "确认下单", exact: true }),
+      ).toBeEnabled({ timeout: 5000 });
+    }
+    if (mode === "manual") {
+      await page.getByLabel("合成 CPU", { exact: true }).selectOption("cpu-1");
+      await expect(
+        page.getByRole("button", { name: "确认下单", exact: true }),
+      ).toBeEnabled();
+    }
+  });
+}
+test("ready polling updates CPU occupancy and failed deletion never creates replacement previews", async ({
+  page,
+}) => {
+  const state = await craftingFixture(page.context());
+  await ready(page);
+  await preview(page);
+  await expect(
+    page.getByRole("button", { name: "确认下单", exact: true }),
+  ).toBeEnabled();
+  state.cpuMode = "busy";
+  await expect(
+    page.getByRole("button", { name: "确认下单", exact: true }),
+  ).toBeDisabled({ timeout: 5000 });
+  state.deleteFailure = true;
+  await page.getByLabel("合成数量", { exact: true }).fill("65");
+  await page.getByRole("button", { name: "预览合成", exact: true }).click();
+  await expect(page.locator(".craft-error")).toContainText("30 秒");
+  expect(state.plans.size).toBe(1);
+});
+test("external and cross-network tasks remain readable and remote material windows stay bounded", async ({
+  page,
+}) => {
+  const state = await craftingFixture(page.context());
+  state.external = true;
+  state.crossNetwork = true;
+  state.materialCount = 1000;
+  await ready(page);
+  await page.getByRole("button", { name: "合成订单", exact: true }).click();
+  await page.getByRole("button", { name: /外部合成 CPU/ }).click();
+  await expect(page.locator(".cpu-detail")).toContainText(
+    "任务属于其他网络，只读",
+  );
+  await expect(page.locator(".cpu-eta")).toContainText("预计剩余约 30 秒");
+  await expect(page.locator(".material-cell").first()).toContainText("已存储");
+  expect(await page.locator(".material-cell").count()).toBeLessThanOrEqual(120);
+  await expect(page.getByRole("button", { name: /取消订单/ })).toHaveCount(0);
+  await page
+    .locator(".material-grid-scroll")
+    .evaluate((el) => (el.scrollTop = 15000));
+  await expect
+    .poll(async () =>
+      page.locator(".material-cell").first().getAttribute("data-material-id"),
+    )
+    .not.toBe("material-0");
+  state.statusFailure = true;
+  await expect(page.locator(".cpu-eta")).toHaveText("暂无法估算", {
+    timeout: 5000,
+  });
+  await expect(page.locator(".material-cell").first()).toBeVisible();
+});
+test("availability segments support keyboard selection and preserve selected statistics", async ({
+  page,
+}) => {
+  await craftingFixture(page.context());
+  await ready(page);
+  const segments = page.getByRole("radiogroup", { name: "库存与合成筛选" });
+  await segments.getByRole("radio", { name: "全部", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(
+    segments.getByRole("radio", { name: "库存", exact: true }),
+  ).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator('[data-resource-id="resource-2"]')).toHaveCount(0);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".inventory-card")).toHaveCount(3);
+  await page.reload();
+  await expect(
+    segments.getByRole("radio", { name: "可合成", exact: true }),
+  ).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".resource-stats")).toContainText("+18,000");
+});
+test("atlas crops actual pixels at 28 and 32px and quality overlays use identical coordinates", async ({
+  page,
+}) => {
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192"><rect width="192" height="192" fill="#00ff00"/><rect x="64" y="64" width="64" height="64" fill="#ff0000"/></svg>';
+  const overlay =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192"><rect x="96" y="96" width="32" height="32" fill="#ffff00"/></svg>';
+  const icon = {
+    url: "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+    width: 192,
+    height: 192,
+    x: 64,
+    y: 64,
+  };
+  const star = {
+    ...icon,
+    url: "data:image/svg+xml;base64," + Buffer.from(overlay).toString("base64"),
+  };
+  await craftingFixture(page.context(), {
+    presentation: { icon, overlay: star, quality: 2 },
+  });
+  await ready(page);
+  async function pixels(selector: string, size: number) {
+    const target = page.locator(selector).first();
+    await expect(target).toHaveCSS("width", size + "px");
+    const png = await target.screenshot();
+    const result = await page.evaluate(
+      async ({ bytes, size }) => {
+        const bitmap = await createImageBitmap(
+          new Blob([new Uint8Array(bytes)], { type: "image/png" }),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d")!;
+        ctx.drawImage(bitmap, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        let bad = 0;
+        for (let i = 0; i < data.length; i += 4)
+          if (data[i + 1] > data[i] && data[i + 1] > data[i + 2]) bad++;
+        return {
+          bad,
+          red: Array.from(ctx.getImageData(2, 2, 1, 1).data),
+          gold: Array.from(ctx.getImageData(size - 3, size - 3, 1, 1).data),
+        };
+      },
+      { bytes: Array.from(png), size },
+    );
+    expect(result).toEqual({
+      bad: 0,
+      red: [255, 0, 0, 255],
+      gold: [255, 255, 0, 255],
+    });
+  }
+  await pixels(".inventory-card .resource-icon", 32);
+  await page.getByRole("button", { name: "列表", exact: true }).click();
+  await pixels(".inventory-row .resource-icon", 28);
+  await page.getByRole("button", { name: "网格", exact: true }).click();
+  await preview(page);
+  await pixels(".material-cell .resource-icon", 32);
+  await expect(page.locator(".material-cell .resource-icon")).toHaveAttribute(
+    "aria-label",
+    "铁锭 · 金星",
+  );
+});
+
+test("CPU ETA pauses after no progress, resumes, and task replacement clears old materials", async ({
+  page,
+}) => {
+  const now = Date.now();
+  await page.clock.setFixedTime(new Date(now));
+  const state = await craftingFixture(page.context());
+  state.sampledAt = now;
+  state.materialCount = 500;
+  await ready(page);
+  await preview(page);
+  await page.getByRole("button", { name: "确认下单", exact: true }).click();
+  await expect(page.locator(".cpu-eta")).toHaveText("预计剩余约 30 秒");
+  state.sampledAt = now + 31000;
+  await page.clock.setFixedTime(new Date(state.sampledAt));
+  await page.getByRole("button", { name: "刷新订单", exact: true }).click();
+  await expect(page.locator(".cpu-eta")).toHaveText("暂无进展，暂无法估算");
+  state.completedWork = "50";
+  state.sampledAt += 2000;
+  await page.clock.setFixedTime(new Date(state.sampledAt));
+  await page.getByRole("button", { name: "刷新订单", exact: true }).click();
+  await expect(page.locator(".cpu-eta")).toHaveText("预计剩余约 10 秒");
+  state.statusChangedOnce = true;
+  await page
+    .locator(".material-grid-scroll")
+    .evaluate((el) => (el.scrollTop = 1480));
+  await expect.poll(() => state.statusChangedOnce).toBe(false);
+  state.taskId = "native-replacement";
+  state.materialName = "新任务材料";
+  await page.getByRole("button", { name: "刷新订单", exact: true }).click();
+  await expect(page.locator(".material-cell").first()).toContainText(
+    "新任务材料",
+  );
+  await expect(page.locator(".material-grid-scroll")).toHaveJSProperty(
+    "scrollTop",
+    0,
+  );
+  state.sampledAt -= 10000;
+  await page.getByRole("button", { name: "刷新订单", exact: true }).click();
+  await expect(page.locator(".cpu-eta")).toHaveText("暂无法估算");
+});

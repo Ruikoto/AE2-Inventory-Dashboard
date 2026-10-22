@@ -11,3 +11,10 @@ The original attribution and LGPL-3.0-or-later license remain applicable.
 
 This project is not an official Applied Energistics, Minecraft or Forge product.
 Bundled third-party software and generated asset packs retain their own licenses.
+
+Crafting material/status presentation and workload estimates reference Applied
+Energistics 2 15.4.10 by TeamAppliedEnergistics. Quality Food display compatibility
+references Quality Food 2.3.0 by Cadentem (MIT). No upstream game artwork is bundled.
+
+Browser pinyin search includes pinyin-pro 3.29.5 by zh-lx (MIT).
+Its full license is distributed at web/pinyin-pro-LICENSE.txt.

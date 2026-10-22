@@ -20,6 +20,7 @@ import InventoryGrid from "./InventoryGrid.vue";
 import CraftingDialog from "./CraftingDialog.vue";
 import CraftingOrders from "./CraftingOrders.vue";
 import TrendChart from "./TrendChart.vue";
+import SegmentedFilter from "./SegmentedFilter.vue";
 const vm = useDashboard();
 const crafting = useCrafting(vm.status, vm.networkId);
 const {
@@ -52,7 +53,34 @@ const {
   customFrom,
   customTo,
   password,
+  loginBusy,
 } = vm;
+const typeOptions = [
+  {
+    value: "all",
+    label: "全部",
+    path: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
+  },
+  {
+    value: "item",
+    label: "物品",
+    path: "m12 3 9 5v8l-9 5-9-5V8zm0 10 9-5M12 13 3 8m9 5v8",
+  },
+  {
+    value: "fluid",
+    label: "流体",
+    path: "M12 2S5 10 5 15a7 7 0 0 0 14 0C19 10 12 2 12 2Z",
+  },
+];
+const availabilityOptions = [
+  { value: "all", label: "全部", path: "M4 5h16M4 12h16M4 19h16" },
+  { value: "stock", label: "库存", path: "M3 9h18v11H3zM2 4h20v5H2zm7 9h6" },
+  {
+    value: "craftable",
+    label: "可合成",
+    path: "m14 3 7 7-4 4-7-7zm-2 9L3 21m7-7 3 3",
+  },
+];
 const units = computed(() => [
   ...new Set(selectedRows.value.map((row) => row.unit)),
 ]);
@@ -100,7 +128,10 @@ const chartGroups = computed(() =>
         required
       />
       <p v-if="error" role="alert" class="error-text">{{ error }}</p>
-      <button class="primary" type="submit">进入</button>
+      <p class="login-note">登录状态将在此浏览器保留 30 天</p>
+      <button class="primary" type="submit" :disabled="loginBusy">
+        {{ loginBusy ? "正在登录…" : "进入" }}
+      </button>
     </form>
   </main>
   <main
@@ -228,15 +259,23 @@ const chartGroups = computed(() =>
         ><input
           v-model="preferences.search"
           aria-label="搜索物品"
-          placeholder="搜索名称或注册 ID"
+          placeholder="搜索名称、拼音、首字母或注册 ID"
         />
       </div>
-      <select v-model="preferences.type" aria-label="资源类型">
-        <option value="all">全部类型</option>
-        <option value="item">物品</option>
-        <option value="fluid">流体</option>
-        <option value="other">其他</option></select
-      ><select v-model="preferences.namespace" aria-label="Mod 筛选">
+      <SegmentedFilter
+        v-model="preferences.type"
+        label="资源类型"
+        :options="typeOptions"
+      />
+      <SegmentedFilter
+        :model-value="preferences.availability"
+        label="库存与合成筛选"
+        :options="availabilityOptions"
+        @update:model-value="
+          preferences.availability = $event as typeof preferences.availability
+        "
+      />
+      <select v-model="preferences.namespace" aria-label="Mod 筛选">
         <option value="">全部 Mod</option>
         <option v-for="ns in namespaces" :key="ns">{{ ns }}</option></select
       ><label class="check"
@@ -378,6 +417,7 @@ const chartGroups = computed(() =>
           @compare="vm.compare"
           @select="vm.select"
           @craft="crafting.open"
+          @clear-filters="vm.clearFilters"
         />
       </section>
       <section class="detail-panel">

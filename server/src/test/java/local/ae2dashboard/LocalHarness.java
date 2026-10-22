@@ -15,7 +15,8 @@ public final class LocalHarness {
         new Config(
             "127.0.0.1", 18766, "public", "", 10, 64, false, world.resolve("missing.zip"), "");
     var service = new DashboardService(world, config);
-    var http = new DashboardHttp(service, config);
+    var http =
+        new DashboardHttp(service, config, world.resolve("config/ae2-dashboard-sessions.json"));
     http.start();
     String id = "8b7cc408-99b6-450f-ab76-d895c078f73c";
     long now = System.currentTimeMillis();

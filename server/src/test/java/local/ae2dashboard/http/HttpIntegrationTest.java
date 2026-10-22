@@ -39,7 +39,7 @@ class HttpIntegrationTest {
             directory.resolve("absent.zip"),
             "");
     try (var service = new DashboardService(directory, config);
-        var server = new DashboardHttp(service, config)) {
+        var server = new DashboardHttp(service, config, directory.resolve("sessions.json"))) {
       server.start();
       String base = "http://127.0.0.1:" + server.port();
       var client = HttpClient.newHttpClient();
@@ -121,7 +121,7 @@ class HttpIntegrationTest {
         new Config(
             "127.0.0.1", 0, "public", "secret", 10, 64, false, directory.resolve("absent.zip"), "");
     try (var service = new DashboardService(directory, config);
-        var server = new DashboardHttp(service, config)) {
+        var server = new DashboardHttp(service, config, directory.resolve("sessions.json"))) {
       server.start();
       String id = UUID.randomUUID().toString();
       long now = System.currentTimeMillis();
@@ -206,7 +206,7 @@ class HttpIntegrationTest {
     }
     Config config = new Config("127.0.0.1", 0, "public", "secret", 10, 64, false, pack, "");
     try (var service = new DashboardService(directory, config);
-        var server = new DashboardHttp(service, config)) {
+        var server = new DashboardHttp(service, config, directory.resolve("sessions.json"))) {
       assertEquals("loaded", service.assets().status());
       assertTrue(service.assets().hasIcon("exact"));
       server.start();

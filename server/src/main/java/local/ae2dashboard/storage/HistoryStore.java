@@ -15,6 +15,11 @@ import local.ae2dashboard.model.*;
 
 /** Owned by one writer. Readers use independent, short-lived query-only connections. */
 public final class HistoryStore implements AutoCloseable {
+  // 仅把显示所需的品质候选身份带回内部；HTTP始终显式排除identity。
+  private static final String DISPLAY_RESOURCE_COLUMNS =
+      "r.id,r.group_id,r.type,r.registry_id,r.name,r.unit,r.amount_per_unit,"
+          + "CASE WHEN r.type='item' AND instr(r.identity,'quality_food')>0"
+          + " THEN r.identity ELSE '' END AS identity";
   private final Path path;
   private Connection writer;
   private final SqliteWatchdog watchdog = new SqliteWatchdog();
@@ -1024,14 +1029,41 @@ public final class HistoryStore implements AutoCloseable {
         var s =
             prepare(
                 c,
-                "SELECT id,group_id,type,registry_id,name,unit,amount_per_unit,'' AS identity FROM"
-                    + " resources ORDER BY id LIMIT ? OFFSET ?",
+                "SELECT "
+                    + DISPLAY_RESOURCE_COLUMNS
+                    + " FROM resources r ORDER BY r.id LIMIT ? OFFSET ?",
                 Math.min(limit, 2000),
                 offset);
         var r = s.executeQuery()) {
       List<Resource> list = new ArrayList<>();
       while (r.next()) list.add(resource(r));
       return list;
+    }
+  }
+
+  /** 一页旧订单的显示增强，共用一次受限读取，不逐项借用连接。 */
+  public Map<String, Resource> resourcesByIds(Collection<String> ids) throws SQLException {
+    if (ids.isEmpty()) return Map.of();
+    if (ids.size() > 100) throw new IllegalArgumentException("Resource lookup exceeds page limit");
+    try (var lease = reader();
+        var c = lease.connection();
+        var operation = lease.operation();
+        var s =
+            prepare(
+                c,
+                "SELECT "
+                    + DISPLAY_RESOURCE_COLUMNS
+                    + " FROM resources r WHERE r.id IN ("
+                    + String.join(",", Collections.nCopies(ids.size(), "?"))
+                    + ")",
+                ids.toArray());
+        var rows = s.executeQuery()) {
+      var result = new HashMap<String, Resource>();
+      while (rows.next()) {
+        var resource = resource(rows);
+        result.put(resource.id(), resource);
+      }
+      return result;
     }
   }
 
@@ -1043,8 +1075,9 @@ public final class HistoryStore implements AutoCloseable {
         var s =
             prepare(
                 c,
-                "SELECT r.id,r.group_id,r.type,r.registry_id,r.name,r.unit,r.amount_per_unit,'' AS"
-                    + " identity FROM resources r JOIN series s ON s.resource=r.id WHERE"
+                "SELECT "
+                    + DISPLAY_RESOURCE_COLUMNS
+                    + " FROM resources r JOIN series s ON s.resource=r.id WHERE"
                     + " s.network=? AND (r.id LIKE 'group:%')=? ORDER BY r.id LIMIT ? OFFSET ?",
                 network,
                 grouped ? 1 : 0,
@@ -1135,8 +1168,9 @@ public final class HistoryStore implements AutoCloseable {
         try (var s =
                 prepare(
                     c,
-                    "SELECT r.id,r.group_id,r.type,r.registry_id,r.name,r.unit,r.amount_per_unit,''"
-                        + " AS identity,"
+                    "SELECT "
+                        + DISPLAY_RESOURCE_COLUMNS
+                        + ","
                         + quantity
                         + ",COALESCE(c.craftable,0) AS craftable,COALESCE(c.infinite,0) AS infinite"
                         + where

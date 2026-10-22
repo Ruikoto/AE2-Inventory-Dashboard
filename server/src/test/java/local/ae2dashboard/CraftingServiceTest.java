@@ -176,6 +176,7 @@ class CraftingServiceTest {
           service.crafting().submit(network, order.planId(), "", order.requestId()).get().id());
       assertEquals(1, backend.submits.get());
       assertEquals(1, service.crafting().orders(network, true, 50, "").orders().size());
+      assertFalse(backend.plans.containsKey(order.planId()));
     }
   }
 
@@ -293,6 +294,86 @@ class CraftingServiceTest {
       assertEquals(
           "9223372036854775807",
           service.crafting().createPlan(network, "exact", "9223372036854775807").get().quantity());
+    }
+  }
+
+  @Test
+  void cpuStatusRemainsReadOnlyWhenNewOrdersAreDisabled() throws Exception {
+    try (var service = new DashboardService(directory, config(false))) {
+      backend(service);
+      var crafting = service.crafting();
+      CpuStatus status = crafting.cpuStatus(network, "cpu", "", 0, 120, null).get();
+      assertEquals("idle", status.state());
+      assertTrue(status.detailsAvailable());
+      assertTrue(crafting.activeOrders().isEmpty());
+      assertTrue(crafting.orders(network, true, 50, "").orders().isEmpty());
+      assertEquals(
+          "STATUS_CHANGED",
+          ((Failure)
+                  assertThrows(
+                          ExecutionException.class,
+                          () -> crafting.cpuStatus(network, "cpu", "", 0, 120, 2L).get())
+                      .getCause())
+              .code());
+      assertEquals(
+          "TASK_CHANGED",
+          ((Failure)
+                  assertThrows(
+                          ExecutionException.class,
+                          () ->
+                              crafting
+                                  .cpuStatus(
+                                      network, "cpu", UUID.randomUUID().toString(), 0, 120, null)
+                                  .get())
+                      .getCause())
+              .code());
+      for (int[] page :
+          List.of(
+              new int[] {-1, 120}, new int[] {0, 0}, new int[] {0, 121}, new int[] {100001, 120})) {
+        assertEquals(
+            "INVALID_PARAMETER",
+            assertThrows(
+                    Failure.class,
+                    () -> crafting.cpuStatus(network, "cpu", "", page[0], page[1], null))
+                .code());
+      }
+      assertThrows(Failure.class, () -> crafting.cpuStatus(network, "", "", 0, 120, null));
+      assertThrows(
+          Failure.class, () -> crafting.cpuStatus(network, "cpu", "not-a-uuid", 0, 120, null));
+    }
+  }
+
+  @Test
+  void pendingSubmissionCapacityIsDistinctFromNativeQueue() throws Exception {
+    try (var service = new DashboardService(directory, config(true))) {
+      var backend = backend(service);
+      backend.submitGate = new CompletableFuture<>();
+      var crafting = service.crafting();
+      var plans = new ArrayList<Plan>();
+      for (int i = 0; i < 32; i++) plans.add(crafting.createPlan(network, "exact", "64").get());
+      List<CompletableFuture<Order>> pending = new ArrayList<>();
+      try {
+        for (int i = 0; i < 32; i++) {
+          pending.add(
+              crafting.submit(network, plans.get(i).id(), "", UUID.randomUUID().toString()));
+          long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+          while (backend.submits.get() <= i && System.nanoTime() < deadline) Thread.sleep(1);
+          assertEquals(i + 1, backend.submits.get());
+          service.write(() -> null).get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(
+            "SUBMISSION_LIMIT",
+            assertThrows(
+                    Failure.class,
+                    () ->
+                        crafting.submit(
+                            network, plans.get(0).id(), "", UUID.randomUUID().toString()))
+                .code());
+        assertEquals(32, backend.submits.get());
+      } finally {
+        backend.submitGate.complete(null);
+      }
+      for (var attempt : pending) assertEquals("running", attempt.get(5, TimeUnit.SECONDS).state());
     }
   }
 }

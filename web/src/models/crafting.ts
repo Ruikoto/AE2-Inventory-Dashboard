@@ -1,9 +1,13 @@
+import type { Icon } from "./types";
 export interface CraftingItem {
   id: string;
   name: string;
   unit: string;
   type: string;
   registryId: string;
+  icon?: Icon;
+  overlay?: Icon;
+  quality?: number;
 }
 export interface CraftingCpu {
   id: string;
@@ -12,6 +16,37 @@ export interface CraftingCpu {
   coprocessors: number;
   busy: boolean;
   selectable: boolean;
+  autoSelectable: boolean;
+  taskId: string;
+  output?: CraftingItem;
+  outputQuantity: string;
+  totalWork: string;
+  completedWork: string;
+  elapsedNanos: string;
+  dashboardOrderId: string;
+  canCancel: boolean;
+}
+export interface CpuMaterial {
+  item: CraftingItem;
+  stored: string;
+  active: string;
+  pending: string;
+}
+export interface CpuStatus {
+  cpuId: string;
+  taskId: string;
+  version: number;
+  sampledAt: number;
+  state: "running" | "idle" | "unavailable";
+  cantStoreItems: boolean;
+  totalWork: string;
+  completedWork: string;
+  elapsedNanos: string;
+  offset: number;
+  total: number;
+  entries: CpuMaterial[];
+  detailsAvailable: boolean;
+  error?: string;
 }
 export interface CraftingMaterial {
   item: CraftingItem;
@@ -86,6 +121,38 @@ export function progressPercent(order: CraftingOrder): number | undefined {
     return undefined;
   return Number((BigInt(order.progress) * 10000n) / BigInt(order.total)) / 100;
 }
+export function workPercent(
+  total: string,
+  completed: string,
+): number | undefined {
+  const value = BigInt(total);
+  if (value <= 0n) return undefined;
+  return Number((BigInt(completed) * 10000n) / value) / 100;
+}
+export function estimatedRemaining(
+  total: string,
+  completed: string,
+  elapsedNanos: string,
+): string {
+  const done = BigInt(completed),
+    remaining = BigInt(total) - done;
+  if (done <= 0n) return "估算中";
+  if (remaining <= 0n) return "即将完成";
+  const seconds =
+    ((BigInt(elapsedNanos) * remaining) / done + 999999999n) / 1000000000n;
+  const days = seconds / 86400n,
+    hours = (seconds % 86400n) / 3600n,
+    minutes = (seconds % 3600n) / 60n;
+  const duration =
+    days > 0n
+      ? `${days} 天 ${hours} 小时`
+      : hours > 0n
+        ? `${hours} 小时 ${minutes} 分钟`
+        : minutes > 0n
+          ? `${minutes} 分钟 ${seconds % 60n} 秒`
+          : `${seconds} 秒`;
+  return `预计剩余约 ${duration}`;
+}
 export function craftingError(code: string): string {
   return (
     (
@@ -96,6 +163,15 @@ export function craftingError(code: string): string {
         CRAFTING_INITIALIZING: "合成服务正在恢复订单，请稍后重试",
         CRAFTING_STORAGE_UNAVAILABLE: "订单暂时无法保存，请稍后重试",
         CRAFTING_BUSY: "合成服务忙碌，请稍后重试",
+        NETWORK_PREVIEW_LIMIT:
+          "此网络的预览名额已满，请关闭不用的预览或等待最多 30 秒后重试",
+        GLOBAL_PREVIEW_LIMIT: "当前预览人数较多，请稍后重试",
+        CRAFTING_QUEUE_BUSY: "合成请求队列忙碌，请稍后重试",
+        SUBMISSION_LIMIT: "正在提交的订单较多，请稍后重试",
+        ACTIVE_ORDER_LIMIT: "进行中订单已达上限，请等待部分订单结束",
+        TASK_CHANGED: "CPU 任务已改变，正在重新读取",
+        STATUS_CHANGED: "材料状态已更新，正在重新读取",
+        STATUS_TOO_LARGE: "材料明细超出显示上限，工作量状态仍可查看",
         CRAFTING_FAILED: "合成操作失败，请稍后重试",
         NETWORK_UNAVAILABLE: "网络当前不可用，请恢复供电或加载网络",
         NETWORK_CHANGED: "网络结构已改变，请重新预览；跨网络任务请在游戏内处理",

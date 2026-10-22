@@ -44,6 +44,7 @@ export function useDashboard() {
     envelope = toRef(preferences, "envelope");
   const error = ref(""),
     busy = ref(false),
+    loginBusy = ref(false),
     mobileDetail = ref(false),
     storageMessage = ref("");
   const aliases = ref<Record<string, string>>({}),
@@ -383,6 +384,8 @@ export function useDashboard() {
     }
   }
   async function login() {
+    if (loginBusy.value) return;
+    loginBusy.value = true;
     try {
       await request("session", undefined, {
         method: "POST",
@@ -393,13 +396,17 @@ export function useDashboard() {
       error.value = "";
       await refresh();
     } catch (e) {
-      password.value = "";
+      if (e instanceof ApiError && e.status === 401) password.value = "";
       error.value =
-        e instanceof ApiError && e.status === 429
-          ? "尝试过于频繁，请稍后重试"
-          : e instanceof ApiError && e.status === 401
-            ? "密码错误"
-            : "登录失败，请检查访问地址或稍后重试";
+        e instanceof ApiError && e.code === "SESSION_STORAGE_UNAVAILABLE"
+          ? "登录状态暂时无法保存，请稍后重试"
+          : e instanceof ApiError && e.status === 429
+            ? "尝试过于频繁，请稍后重试"
+            : e instanceof ApiError && e.status === 401
+              ? "密码错误"
+              : "登录失败，请检查访问地址或稍后重试";
+    } finally {
+      loginBusy.value = false;
     }
   }
   async function logout() {
@@ -409,8 +416,19 @@ export function useDashboard() {
       if (status.value)
         status.value = { ...status.value, authenticated: false };
     } catch (e) {
-      fail(e);
+      error.value =
+        e instanceof ApiError && e.code === "SESSION_STORAGE_UNAVAILABLE"
+          ? "退出失败，登录状态仍保留，请重试"
+          : "退出失败，请稍后重试";
     }
+  }
+  function clearFilters() {
+    preferences.search = "";
+    preferences.type = "all";
+    preferences.availability = "all";
+    preferences.namespace = "";
+    preferences.onlyFavorites = false;
+    preferences.excludeInfinite = false;
   }
   function alias(value: string) {
     aliases.value[networkId.value] = value.slice(0, 100);
@@ -474,6 +492,7 @@ export function useDashboard() {
     () => [
       preferences.search,
       preferences.type,
+      preferences.availability,
       preferences.namespace,
       preferences.onlyFavorites,
       preferences.excludeInfinite,
@@ -595,6 +614,7 @@ export function useDashboard() {
     envelope,
     error,
     busy,
+    loginBusy,
     mobileDetail,
     storageMessage,
     aliases,
@@ -605,6 +625,7 @@ export function useDashboard() {
     refreshHistory,
     login,
     logout,
+    clearFilters,
     alias,
     compare,
     select,

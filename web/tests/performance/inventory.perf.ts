@@ -55,8 +55,12 @@ for (const view of ["grid", "list"] as const) {
       expect(calls.historyIds).toHaveLength(6);
       const readyMs = Date.now() - began;
       const filterTimings: number[] = [];
-      for (let i = 20; i < 40; i++) {
-        filterTimings.push(
+      const pinyinTimings: number[] = [];
+      const initialTimings: number[] = [];
+      for (let i = 20; i < 80; i++) {
+        const timings =
+          i < 40 ? filterTimings : i < 60 ? pinyinTimings : initialTimings;
+        timings.push(
           await page.evaluate(
             ({ query, id }) =>
               new Promise<number>((resolve, reject) => {
@@ -83,7 +87,15 @@ for (const view of ["grid", "list"] as const) {
                 input.value = query;
                 input.dispatchEvent(new Event("input", { bubbles: true }));
               }),
-            { query: `minecraft:resource_${i}`, id: `resource-${i}` },
+            {
+              query:
+                i < 40
+                  ? `minecraft:resource_${i}`
+                  : i < 60
+                    ? `jiawupin ${i}`
+                    : `jwp ${i}`,
+              id: `resource-${i}`,
+            },
           ),
         );
       }
@@ -160,6 +172,14 @@ for (const view of ["grid", "list"] as const) {
         filterTimings,
         filterP95Ms: [...filterTimings].sort((a, b) => a - b)[
           Math.floor(filterTimings.length * 0.95)
+        ],
+        pinyinTimings,
+        pinyinP95Ms: [...pinyinTimings].sort((a, b) => a - b)[
+          Math.floor(pinyinTimings.length * 0.95)
+        ],
+        initialTimings,
+        initialP95Ms: [...initialTimings].sort((a, b) => a - b)[
+          Math.floor(initialTimings.length * 0.95)
         ],
         observationMs: duration,
         calls: {

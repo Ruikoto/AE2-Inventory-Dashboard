@@ -4,6 +4,7 @@ import appeng.api.networking.GridServices;
 import java.nio.file.Path;
 import local.ae2dashboard.*;
 import local.ae2dashboard.http.DashboardHttp;
+import local.ae2dashboard.identity.QualityFoodDisplay;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.storage.LevelResource;
@@ -39,12 +40,14 @@ public final class DashboardMod {
     try {
       Config config = Config.load(FMLPaths.CONFIGDIR.get());
       world = event.getServer().getWorldPath(LevelResource.ROOT);
-      service = new DashboardService(world, config);
+      service = new DashboardService(world, config, QualityFoodDisplay::hint);
       sampler = new AeSampler(service, config.sampleIntervalSeconds());
       crafting = new AeCrafting(service, sampler, event.getServer());
       service.crafting().setBackend(crafting);
       try {
-        http = new DashboardHttp(service, config);
+        http =
+            new DashboardHttp(
+                service, config, FMLPaths.CONFIGDIR.get().resolve("ae2-dashboard-sessions.json"));
         http.start();
         service.httpStatus("listening");
       } catch (Exception e) {

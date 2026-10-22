@@ -17,6 +17,7 @@ export async function dashboardFixture(
     singleNetwork?: boolean;
     capabilities?: boolean;
     craftingEnabled?: boolean;
+    presentation?: Record<string, unknown>;
   } = {},
 ) {
   const count = options.count ?? 120;
@@ -63,6 +64,7 @@ export async function dashboardFixture(
         delta: "-120",
         rate: "-720",
         variantCount: merged ? 2 : 1,
+        ...options.presentation,
       };
     };
     let json: object;

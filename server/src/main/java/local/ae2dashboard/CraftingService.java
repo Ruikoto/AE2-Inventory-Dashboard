@@ -17,6 +17,7 @@ public final class CraftingService implements AutoCloseable {
   private final ConcurrentHashMap<String, Order> active = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Order> dirty = new ConcurrentHashMap<>();
   private final Map<String, Submission> submissions = new HashMap<>();
+  private final Map<String, Long> capacityWarnings = new HashMap<>();
   private final AtomicBoolean writing = new AtomicBoolean();
   private volatile Backend backend;
   private volatile boolean initialized, loading, closing, persistenceFailed;
@@ -27,6 +28,9 @@ public final class CraftingService implements AutoCloseable {
   /** 实现只在游戏线程使用原生对象，Future 仅传递脱离游戏对象的数据。 */
   public interface Backend extends AutoCloseable {
     CompletableFuture<List<Cpu>> cpus(String network);
+
+    CompletableFuture<CpuStatus> cpuStatus(
+        String network, String cpuId, String taskId, int offset, int limit, Long version);
 
     CompletableFuture<Plan> createPlan(String network, String resourceId, String quantity);
 
@@ -61,6 +65,17 @@ public final class CraftingService implements AutoCloseable {
     if (persistenceFailed) return "persistence-unavailable";
     if (!initialized) return "initializing";
     return backend == null || closing ? "unavailable" : "ready";
+  }
+
+  private Failure capacity(String code) {
+    long now = System.currentTimeMillis();
+    synchronized (capacityWarnings) {
+      if (now - capacityWarnings.getOrDefault(code, 0L) >= 30_000) {
+        capacityWarnings.put(code, now);
+        LOG.warn("Dashboard crafting capacity reached: {}", code);
+      }
+    }
+    return new Failure(code);
   }
 
   private synchronized void restore() {
@@ -126,6 +141,19 @@ public final class CraftingService implements AutoCloseable {
     return backend(false).cpus(network);
   }
 
+  public CompletableFuture<CpuStatus> cpuStatus(
+      String network, String cpuId, String taskId, int offset, int limit, Long version) {
+    if (cpuId == null || cpuId.isBlank() || cpuId.length() > 512) throw new Failure("INVALID_CPU");
+    if (taskId == null) throw new Failure("INVALID_REQUEST");
+    if (!taskId.isEmpty()) uuid(taskId);
+    if (offset < 0
+        || offset > 100000
+        || limit < 1
+        || limit > 120
+        || (version != null && version < 0)) throw new Failure("INVALID_PARAMETER");
+    return backend(false).cpuStatus(network, cpuId, taskId, offset, limit, version);
+  }
+
   public CompletableFuture<Plan> createPlan(String network, String resourceId, String quantity) {
     if (resourceId == null
         || resourceId.isBlank()
@@ -164,7 +192,7 @@ public final class CraftingService implements AutoCloseable {
           throw new Failure("REQUEST_CONFLICT");
         return entry.result();
       }
-      if (submissions.size() >= 32) throw new Failure("CRAFTING_BUSY");
+      if (submissions.size() >= 32) throw capacity("SUBMISSION_LIMIT");
       entry = new Submission(plan, cpu, new CompletableFuture<>());
       submissions.put(key, entry);
     }
@@ -211,7 +239,7 @@ public final class CraftingService implements AutoCloseable {
                             .write(
                                 () -> {
                                   if (active.size() >= MAX_ACTIVE)
-                                    throw new Failure("CRAFTING_BUSY");
+                                    throw capacity("ACTIVE_ORDER_LIMIT");
                                   Order saved = service.store().insertOrderIntent(candidate);
                                   if (saved.id().equals(candidate.id()))
                                     active.put(saved.id(), saved);

@@ -4,6 +4,7 @@ import appeng.api.networking.IGrid;
 import appeng.api.networking.crafting.*;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.stacks.AEKey;
+import appeng.api.stacks.KeyCounter;
 import appeng.blockentity.crafting.CraftingBlockEntity;
 import appeng.me.cluster.implementations.CraftingCPUCluster;
 import appeng.menu.me.crafting.CraftingPlanSummary;
@@ -33,9 +34,14 @@ public final class AeCrafting implements CraftingService.Backend {
   private final MinecraftServer server;
   private final ArrayBlockingQueue<Command<?>> commands = new ArrayBlockingQueue<>(32);
   private final Map<String, Entry> plans = new HashMap<>();
+  private final LinkedHashMap<String, TerminalPlan> terminalPlans = new LinkedHashMap<>();
+  private final Map<String, Long> capacityWarnings = new HashMap<>();
+  private final LinkedHashMap<StatusKey, StatusSnapshot> statuses =
+      new LinkedHashMap<>(16, 0.75f, true);
   private final Map<String, Order> tracked = new HashMap<>();
   private Submission submission;
   private long lastTracking;
+  private long statusVersion, statusBytes;
   private volatile boolean closed;
 
   private record Command<T>(Callable<T> action, CompletableFuture<T> result) {
@@ -57,6 +63,7 @@ public final class AeCrafting implements CraftingService.Backend {
     ICraftingPlan plan;
     Plan view;
     long expiresAt;
+    long leaseUntil;
 
     Entry(
         AeSampler.Access access,
@@ -67,6 +74,23 @@ public final class AeCrafting implements CraftingService.Backend {
       this.source = source;
       this.calculation = calculation;
       this.view = view;
+      leaseUntil = view.createdAt() + 30_000;
+    }
+  }
+
+  private record TerminalPlan(Plan view, long expiresAt) {}
+
+  private record StatusKey(String network, IGrid grid, long revision, String cpu, String task) {}
+
+  private static final class StatusSnapshot {
+    final CpuStatus view;
+    final long bytes;
+    long touched;
+
+    StatusSnapshot(CpuStatus view, long bytes, long now) {
+      this.view = view;
+      this.bytes = bytes;
+      touched = now;
     }
   }
 
@@ -94,8 +118,17 @@ public final class AeCrafting implements CraftingService.Backend {
     var result = new CompletableFuture<T>();
     if (closed) result.completeExceptionally(new Failure("CRAFTING_UNAVAILABLE"));
     else if (!commands.offer(new Command<>(action, result)))
-      result.completeExceptionally(new Failure("CRAFTING_BUSY"));
+      result.completeExceptionally(capacity("CRAFTING_QUEUE_BUSY"));
     return result;
+  }
+
+  private synchronized Failure capacity(String code) {
+    long now = System.currentTimeMillis();
+    if (now - capacityWarnings.getOrDefault(code, 0L) >= 30_000) {
+      capacityWarnings.put(code, now);
+      LOG.warn("Dashboard crafting capacity reached: {}, queued={}", code, commands.size());
+    }
+    return new Failure(code);
   }
 
   public void tick() {
@@ -106,14 +139,8 @@ public final class AeCrafting implements CraftingService.Backend {
       command.run();
     }
     long now = System.currentTimeMillis();
-    for (var iterator = plans.values().iterator(); iterator.hasNext(); ) {
-      var entry = iterator.next();
-      refresh(entry, now);
-      if (entry.expiresAt > 0 && now >= entry.expiresAt) {
-        entry.calculation.cancel(true);
-        iterator.remove();
-      }
-    }
+    prunePlans(now);
+    pruneStatuses(now);
     if (service.crafting().ready() && now - lastTracking >= 1000) {
       refreshOrders();
       lastTracking = now;
@@ -124,30 +151,181 @@ public final class AeCrafting implements CraftingService.Backend {
   @Override
   public CompletableFuture<List<Cpu>> cpus(String network) {
     return enqueue(
-        () ->
-            sampler.access(network).grid().getCraftingService().getCpus().stream()
-                .filter(CraftingCPUCluster.class::isInstance)
-                .map(CraftingCPUCluster.class::cast)
-                .map(
-                    cpu ->
-                        new Cpu(
-                            cpuId(cpu),
-                            (cpu.getName() == null ? "" : cpu.getName().getString()),
-                            Long.toString(cpu.getAvailableStorage()),
-                            cpu.getCoProcessors(),
-                            cpu.isBusy(),
-                            cpu.isActive() && !cpu.isDestroyed() && !cpu.isBusy()))
-                .sorted(Comparator.comparing(Cpu::name).thenComparing(Cpu::id))
-                .toList());
+        () -> {
+          var access = sampler.access(network);
+          var source =
+              IActionSource.ofPlayer(FakePlayerFactory.get(access.level(), PROFILE), access.host());
+          var orders = new HashMap<String, Order>();
+          for (Order order : service.crafting().activeOrders()) {
+            if (!order.nativeId().isEmpty()) orders.put(order.nativeId(), order);
+          }
+          return access.grid().getCraftingService().getCpus().stream()
+              .filter(CraftingCPUCluster.class::isInstance)
+              .map(CraftingCPUCluster.class::cast)
+              .map(
+                  cpu -> {
+                    String task = taskId(cpu);
+                    Order order = orders.get(task);
+                    var job = cpu.getJobStatus();
+                    boolean selectable = cpu.isActive() && !cpu.isDestroyed() && !cpu.isBusy();
+                    return new Cpu(
+                        cpuId(cpu),
+                        (cpu.getName() == null ? "" : cpu.getName().getString()),
+                        Long.toString(cpu.getAvailableStorage()),
+                        cpu.getCoProcessors(),
+                        cpu.isBusy(),
+                        selectable,
+                        selectable && cpu.canBeAutoSelectedFor(source),
+                        task,
+                        job == null ? null : item(job.crafting().what()),
+                        job == null ? "0" : Long.toString(job.crafting().amount()),
+                        job == null ? "0" : Long.toString(job.totalItems()),
+                        job == null ? "0" : Long.toString(job.progress()),
+                        job == null ? "0" : Long.toString(job.elapsedTimeNanos()),
+                        order == null ? "" : order.id(),
+                        order != null && order.networkId().equals(network) && !order.terminal());
+                  })
+              .sorted(Comparator.comparing(Cpu::name).thenComparing(Cpu::id))
+              .toList();
+        });
+  }
+
+  @Override
+  public CompletableFuture<CpuStatus> cpuStatus(
+      String network, String id, String task, int offset, int limit, Long version) {
+    return enqueue(
+        () -> {
+          var access = sampler.access(network);
+          var cpu =
+              access.grid().getCraftingService().getCpus().stream()
+                  .filter(CraftingCPUCluster.class::isInstance)
+                  .map(CraftingCPUCluster.class::cast)
+                  .filter(value -> !value.isDestroyed() && cpuId(value).equals(id))
+                  .findFirst()
+                  .orElseThrow(() -> new Failure("CPU_OFFLINE"));
+          if (!taskId(cpu).equals(task)) throw new Failure("TASK_CHANGED");
+          long now = System.currentTimeMillis();
+          pruneStatuses(now);
+          var key = new StatusKey(network, access.grid(), access.revision(), id, task);
+          var cached = statuses.get(key);
+          if (cached == null || now - cached.view.sampledAt() >= 2000) {
+            cached = snapshot(cpu, task, now);
+            var previous = statuses.put(key, cached);
+            if (previous != null) statusBytes -= previous.bytes;
+            statusBytes += cached.bytes;
+            while (statuses.size() > 16 || statusBytes > 32L * 1024 * 1024) {
+              var oldest = statuses.entrySet().iterator();
+              statusBytes -= oldest.next().getValue().bytes;
+              oldest.remove();
+            }
+          }
+          cached.touched = now;
+          CpuStatus view = cached.view;
+          if (version != null && version != view.version()) throw new Failure("STATUS_CHANGED");
+          int from = Math.min(offset, view.entries().size());
+          int to = Math.min(from + limit, view.entries().size());
+          return new CpuStatus(
+              view.cpuId(),
+              view.taskId(),
+              view.version(),
+              view.sampledAt(),
+              view.state(),
+              view.cantStoreItems(),
+              view.totalWork(),
+              view.completedWork(),
+              view.elapsedNanos(),
+              offset,
+              view.total(),
+              view.entries().subList(from, to),
+              view.detailsAvailable(),
+              view.error());
+        });
+  }
+
+  private StatusSnapshot snapshot(CraftingCPUCluster cpu, String task, long now) {
+    var logic = cpu.craftingLogic;
+    var all = new KeyCounter();
+    logic.getAllItems(all);
+    var entries = new ArrayList<CpuMaterial>();
+    long bytes = 512;
+    boolean available = all.size() <= 100000;
+    if (available) {
+      for (var value : all) {
+        AEKey key = value.getKey();
+        long stored = logic.getStored(key), waiting = logic.getWaitingFor(key);
+        // getAllItems 的总量为存储、执行中与待执行之和，避免逐项扫描所有配方。
+        long pending = value.getLongValue() - stored - waiting;
+        if (stored == 0 && waiting == 0 && pending == 0) continue;
+        Item item = item(key);
+        bytes += itemBytes(item);
+        if (bytes > 8L * 1024 * 1024) {
+          available = false;
+          break;
+        }
+        entries.add(
+            new CpuMaterial(
+                item, Long.toString(stored), Long.toString(waiting), Long.toString(pending)));
+      }
+    }
+    if (!available) {
+      entries.clear();
+      bytes = 512;
+    } else
+      entries.sort(
+          Comparator.comparing((CpuMaterial value) -> value.item().name())
+              .thenComparing(value -> value.item().id()));
+    var job = cpu.getJobStatus();
+    var view =
+        new CpuStatus(
+            cpuId(cpu),
+            task,
+            ++statusVersion,
+            now,
+            !cpu.isActive() ? "unavailable" : job == null ? "idle" : "running",
+            logic.isCantStoreItems(),
+            job == null ? "0" : Long.toString(job.totalItems()),
+            job == null ? "0" : Long.toString(job.progress()),
+            job == null ? "0" : Long.toString(job.elapsedTimeNanos()),
+            0,
+            available ? entries.size() : all.size(),
+            entries,
+            available,
+            available ? "" : "STATUS_TOO_LARGE");
+    return new StatusSnapshot(view, bytes, now);
+  }
+
+  private void pruneStatuses(long now) {
+    for (var iterator = statuses.values().iterator(); iterator.hasNext(); ) {
+      var value = iterator.next();
+      if (now - value.touched >= 10000) {
+        statusBytes -= value.bytes;
+        iterator.remove();
+      }
+    }
+  }
+
+  private static String taskId(CraftingCPUCluster cpu) {
+    var link = cpu.craftingLogic.getLastLink();
+    return link == null ? "" : link.getCraftingID().toString();
+  }
+
+  private static long itemBytes(Item item) {
+    return 256L
+        + 2L
+            * (item.id().length()
+                + item.name().length()
+                + item.registryId().length()
+                + (item.baseDisplayId() == null ? 0 : item.baseDisplayId().length()));
   }
 
   @Override
   public CompletableFuture<Plan> createPlan(String network, String resourceId, String quantity) {
     return enqueue(
         () -> {
-          if (plans.size() >= 32
-              || plans.values().stream().filter(e -> e.view.networkId().equals(network)).count()
-                  >= 3) throw new Failure("CRAFTING_BUSY");
+          prunePlans(System.currentTimeMillis());
+          if (plans.values().stream().filter(e -> e.view.networkId().equals(network)).count() >= 3)
+            throw capacity("NETWORK_PREVIEW_LIMIT");
+          if (plans.size() >= 32) throw capacity("GLOBAL_PREVIEW_LIMIT");
           long amount;
           try {
             if (!quantity.matches("[1-9][0-9]*")) throw new NumberFormatException();
@@ -197,9 +375,17 @@ public final class AeCrafting implements CraftingService.Backend {
   public CompletableFuture<Plan> plan(String network, String planId) {
     return enqueue(
         () -> {
-          Entry entry = entry(network, planId);
-          refresh(entry, System.currentTimeMillis());
-          return entry.view;
+          long now = System.currentTimeMillis();
+          prunePlans(now);
+          var entry = plans.get(planId);
+          if (entry != null && entry.view.networkId().equals(network)) {
+            entry.leaseUntil = now + 30_000;
+            return entry.view;
+          }
+          var terminal = terminalPlans.get(planId);
+          if (terminal != null && terminal.view().networkId().equals(network))
+            return terminal.view();
+          throw new Failure("PLAN_NOT_FOUND");
         });
   }
 
@@ -211,9 +397,11 @@ public final class AeCrafting implements CraftingService.Backend {
           if (entry != null && !entry.view.networkId().equals(network))
             throw new Failure("PLAN_NOT_FOUND");
           if (entry != null) {
-            entry.calculation.cancel(true);
-            plans.remove(planId);
+            retire(entry, "cancelled", "", System.currentTimeMillis());
           }
+          var terminal = terminalPlans.get(planId);
+          if (terminal != null && !terminal.view().networkId().equals(network))
+            throw new Failure("PLAN_NOT_FOUND");
           return null;
         });
   }
@@ -225,8 +413,39 @@ public final class AeCrafting implements CraftingService.Backend {
     return entry;
   }
 
+  private void prunePlans(long now) {
+    terminalPlans.values().removeIf(value -> now >= value.expiresAt());
+    // refresh 会把终态移入独立缓存，遍历副本避免修改当前迭代器。
+    for (Entry entry : List.copyOf(plans.values())) refresh(entry, now);
+  }
+
+  private void retire(Entry entry, String state, String error, long now) {
+    entry.calculation.cancel(true);
+    entry.plan = null;
+    var before = entry.view;
+    entry.view =
+        new Plan(
+            before.id(),
+            before.networkId(),
+            before.item(),
+            before.quantity(),
+            state,
+            "0",
+            List.of(),
+            error,
+            before.createdAt());
+    plans.remove(before.id());
+    terminalPlans.put(before.id(), new TerminalPlan(entry.view, now + 60_000));
+    while (terminalPlans.size() > 32)
+      terminalPlans.remove(terminalPlans.keySet().iterator().next());
+  }
+
   private void refresh(Entry entry, long now) {
     if (!Set.of("calculating", "ready", "missing").contains(entry.view.state())) return;
+    if (now >= entry.leaseUntil || (entry.expiresAt > 0 && now >= entry.expiresAt)) {
+      retire(entry, "expired", "PLAN_EXPIRED", now);
+      return;
+    }
     try {
       var current = sampler.access(entry.view.networkId());
       if (current.grid() != entry.access.grid() || current.revision() != entry.access.revision())
@@ -241,8 +460,7 @@ public final class AeCrafting implements CraftingService.Backend {
       long bytes = 0;
       for (var value : summary.getEntries()) {
         Item item = item(value.getWhat());
-        bytes +=
-            256L + 2L * (item.id().length() + item.name().length() + item.registryId().length());
+        bytes += itemBytes(item);
         if (bytes > 8L * 1024 * 1024) throw new Failure("PLAN_TOO_LARGE");
         materials.add(
             new Material(
@@ -264,22 +482,9 @@ public final class AeCrafting implements CraftingService.Backend {
               entry.view.createdAt());
       entry.expiresAt = now + 15 * 60_000;
     } catch (Exception e) {
-      entry.calculation.cancel(true);
       String error = e instanceof Failure failure ? failure.code() : "CALCULATION_FAILED";
       if (!(e instanceof Failure)) LOG.error("Dashboard crafting calculation failed", e);
-      entry.view =
-          new Plan(
-              entry.view.id(),
-              entry.view.networkId(),
-              entry.view.item(),
-              entry.view.quantity(),
-              "failed",
-              "0",
-              List.of(),
-              error,
-              entry.view.createdAt());
-      entry.expiresAt = now + 15 * 60_000;
-      entry.plan = null;
+      retire(entry, "failed", error, now);
     }
   }
 
@@ -288,29 +493,28 @@ public final class AeCrafting implements CraftingService.Backend {
     return enqueue(
         () -> {
           Entry entry = entry(order.networkId(), order.planId());
-          refresh(entry, System.currentTimeMillis());
-          if (!entry.view.state().equals("ready"))
-            throw new Failure(
-                entry.view.state().equals("missing")
-                    ? "MISSING_INGREDIENT"
-                    : entry.view.error().isEmpty() ? "PLAN_NOT_READY" : entry.view.error());
-          if (entry.expiresAt <= System.currentTimeMillis()) throw new Failure("PLAN_EXPIRED");
-          CraftingCPUCluster selected = null;
-          if (!order.requestedCpuId().isEmpty()) {
-            selected =
-                entry.access.grid().getCraftingService().getCpus().stream()
-                    .filter(CraftingCPUCluster.class::isInstance)
-                    .map(CraftingCPUCluster.class::cast)
-                    .filter(cpu -> cpuId(cpu).equals(order.requestedCpuId()))
-                    .findFirst()
-                    .orElseThrow(() -> new Failure("CPU_OFFLINE"));
-            if (!selected.isActive() || selected.isDestroyed()) throw new Failure("CPU_OFFLINE");
-            if (selected.isBusy()) throw new Failure("CPU_BUSY");
-            if (selected.getAvailableStorage() < entry.plan.bytes())
-              throw new Failure("CPU_TOO_SMALL");
-          }
-          submission = new Submission(order, entry.access.grid(), entry.plan);
           try {
+            refresh(entry, System.currentTimeMillis());
+            if (!entry.view.state().equals("ready"))
+              throw new Failure(
+                  entry.view.state().equals("missing")
+                      ? "MISSING_INGREDIENT"
+                      : entry.view.error().isEmpty() ? "PLAN_NOT_READY" : entry.view.error());
+            CraftingCPUCluster selected = null;
+            if (!order.requestedCpuId().isEmpty()) {
+              selected =
+                  entry.access.grid().getCraftingService().getCpus().stream()
+                      .filter(CraftingCPUCluster.class::isInstance)
+                      .map(CraftingCPUCluster.class::cast)
+                      .filter(cpu -> cpuId(cpu).equals(order.requestedCpuId()))
+                      .findFirst()
+                      .orElseThrow(() -> new Failure("CPU_OFFLINE"));
+              if (!selected.isActive() || selected.isDestroyed()) throw new Failure("CPU_OFFLINE");
+              if (selected.isBusy()) throw new Failure("CPU_BUSY");
+              if (selected.getAvailableStorage() < entry.plan.bytes())
+                throw new Failure("CPU_TOO_SMALL");
+            }
+            submission = new Submission(order, entry.access.grid(), entry.plan);
             ICraftingSubmitResult result;
             try {
               result =
@@ -329,8 +533,12 @@ public final class AeCrafting implements CraftingService.Backend {
               publish(order, "unknown", "TRACKING_UNAVAILABLE", null, "");
               LOG.error("Dashboard submission succeeded without a lifecycle association");
             }
-            plans.remove(order.planId());
           } finally {
+            // 已持久化的订单意图消费此计划，CPU 拒绝和未知结果同样不能占用预览名额。
+            plans.remove(order.planId());
+            terminalPlans.remove(order.planId());
+            entry.calculation.cancel(true);
+            entry.plan = null;
             submission = null;
           }
           return null;
@@ -479,15 +687,7 @@ public final class AeCrafting implements CraftingService.Backend {
   }
 
   private Item item(AEKey key) {
-    var resource = sampler.resource(key);
-    var mapped = service.assets().entry(resource.id());
-    String name =
-        mapped != null
-                && mapped.registryId().equals(resource.registryId())
-                && mapped.type().equals(resource.type())
-            ? mapped.name()
-            : resource.name();
-    return new Item(resource.id(), name, resource.unit(), resource.type(), resource.registryId());
+    return service.presentation().item(sampler.resource(key));
   }
 
   private static String cpuId(CraftingCPUCluster cpu) {
@@ -505,6 +705,9 @@ public final class AeCrafting implements CraftingService.Backend {
     if (active == this) active = null;
     for (var entry : plans.values()) entry.calculation.cancel(true);
     plans.clear();
+    terminalPlans.clear();
+    statuses.clear();
+    statusBytes = 0;
     tracked.clear();
     Command<?> command;
     while ((command = commands.poll()) != null)

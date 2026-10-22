@@ -1,12 +1,13 @@
 import type { Resource } from "./types";
 import type { Preferences } from "./preferences";
 import { decimalValue } from "./format";
+import { phoneticName } from "./inventory-search";
 
 export class InventoryIndex {
   readonly byId = new Map<string, Resource>();
   private keys = new Map<
     string,
-    { text: string; namespace: string; quantity: bigint }
+    { text: string; phonetic: string; namespace: string; quantity: bigint }
   >();
   private collator = new Intl.Collator("zh-CN");
   constructor(rows: Resource[]) {
@@ -14,6 +15,7 @@ export class InventoryIndex {
       this.byId.set(row.id, row);
       this.keys.set(row.id, {
         text: `${row.name} ${row.registryId} ${row.id}`.toLocaleLowerCase(),
+        phonetic: phoneticName(row.name).replace(/\s/g, ""),
         namespace: row.registryId.split(":")[0],
         quantity: BigInt(row.quantity),
       });
@@ -21,6 +23,7 @@ export class InventoryIndex {
   }
   filter(p: Preferences): Resource[] {
     const query = p.search.trim().toLocaleLowerCase();
+    const phoneticQuery = query.replace(/\s/g, "");
     const favorites = new Map(p.favorites.map((id, i) => [id, i]));
     const sortedValues = new Map<string, bigint>();
     if (p.sort === "delta" || p.sort === "rate")
@@ -33,7 +36,9 @@ export class InventoryIndex {
         const key = this.keys.get(row.id)!;
         return (
           row.id.startsWith("group:") === p.merged &&
-          (!query || key.text.includes(query)) &&
+          (!query ||
+            key.text.includes(query) ||
+            key.phonetic.includes(phoneticQuery)) &&
           (p.type === "all" ||
             (p.type === "other"
               ? !["item", "fluid"].includes(row.type)
@@ -41,6 +46,8 @@ export class InventoryIndex {
           (!p.namespace || key.namespace === p.namespace) &&
           (!p.onlyFavorites || favorites.has(row.id)) &&
           (!p.excludeInfinite || !row.infinite) &&
+          (p.availability !== "stock" || key.quantity > 0n) &&
+          (p.availability !== "craftable" || row.craftable === true) &&
           (p.zeros || key.quantity !== 0n || row.craftable === true)
         );
       })

@@ -46,3 +46,13 @@ it("orders rates beyond Number precision exactly", () => {
   ).toBe(1);
   expect(decimalOrder("-0.000001", "0")).toBe(-1);
 });
+
+it("restores availability and migrates legacy other type", () => {
+  expect(defaults().availability).toBe("all");
+  expect(
+    loadPreferences("key", '{"availability":"craftable","type":"other"}'),
+  ).toMatchObject({ availability: "craftable", type: "all" });
+  expect(loadPreferences("key", '{"availability":"bad"}').availability).toBe(
+    "all",
+  );
+});

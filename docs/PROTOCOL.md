@@ -5,7 +5,7 @@
 | 路径 | 参数和结果 |
 |---|---|
 | status | 认证模式/状态；认证后有 worldId、历史状态/占用/丢样、资源包状态及 craftingEnabled/craftingStatus |
-| session | POST JSON password 登录，要求 Origin 同源；DELETE 退出，HttpOnly/SameSite Cookie |
+| session | POST JSON password 登录，要求 Origin 同源；DELETE 退出，固定30天的HttpOnly/SameSite持久Cookie，Max-Age=2592000 |
 | networks | 网络 id、label、status、lastSeen、anchors，含 worldId；nonZeroResources/craftableResources/observedAt 为最后完整观测的非零/可合成精确资源数及时间，未知为缺省或 null |
 | networks/{uuid}/inventory | merged、zeros、offset、limit（至多 2000）、可选 group；含 available、timestamp、version、stale、windowMs、rows、total |
 | networks/{uuid}/statistics | merged、from/to、offset、limit（至多 2000）、可选 version；返回 worldId/networkId/version/total/rows，分页版本变化或查询与写入维护重叠时 409 SNAPSHOT_CHANGED |
@@ -39,7 +39,8 @@ SQLite schema=2；从 schema=1 事务迁移，保留统计数据并新增 invent
 
 | 方法与路径 | 请求与响应 |
 |---|---|
-| GET crafting/cpus | `{cpus:[{id,name,storage,coprocessors,busy,selectable}]}` |
+| GET crafting/cpus | `{cpus:[Cpu]}`，当前网络全部CPU的轻量摘要，包括外部任务 |
+| GET crafting/cpus/status | cpuId、taskId、offset默认0、limit默认120且最大120、可选version；返回CpuStatus，只读取指定CPU的可见材料窗口 |
 | POST crafting/plans | `{resourceId,quantity}`；202 返回 Plan，数量为正整数字符串且不超过 Long.MAX_VALUE，流体为 mB |
 | GET crafting/plans/{id} | Plan：id/networkId/item/quantity/state/bytes/materials/error/createdAt |
 | DELETE crafting/plans/{id} | 取消未提交计算，返回 `{cancelled:true}`；已提交订单不受影响 |
@@ -49,10 +50,26 @@ SQLite schema=2；从 schema=1 事务迁移，保留统计数据并新增 invent
 | GET crafting/orders/{id} | 单个 Order |
 | POST crafting/orders/{id}/cancel | 请求体 `{}`；核对当前原生 UUID 和网络后取消，返回 Order |
 
-Item 包含 id/name/unit/type/registryId，无原始 NBT。Material 包含 item/stored/craft/missing，数量与空间均为十进制字符串。Plan.state 为 calculating、ready、missing、failed、cancelled 或 expired；只有 ready 可以提交。每网络至多3个、全局至多32个预览；计算60秒超时，完成后保留15分钟。原生命令队列32条，每tick最多处理4条。
+Item 包含 id/name/unit/type/registryId，可附quality、icon和overlay图标，无原始NBT和内部基础身份。库存资源使用相同的显示字段。quality为0/1/2/3，对应普通/银/金/钻；精确资产优先，只有Quality Food基础精确回退时才组合overlay，不把其他NBT变体当普通资源。内部Crafting.Item额外的baseDisplayId/quality可保存到订单payload，旧payload缺省null/0，图集坐标不持久化。
+
+Material 包含 item/stored/craft/missing，数量与空间均为十进制字符串。Plan.state 为 calculating、ready、missing、failed、cancelled 或 expired；只有 ready 可以提交。有效预览每网络至多3个、全局至多32个；计算60秒超时，完成后绝对有效期15分钟。calculating/ready/missing另有30秒读取租期，GET续期；失联预览到期释放名额。失败/取消/过期结果最多保留60秒、全局32条，不占有效名额。原生命令队列32条，每tick最多处理4条。
+
+Cpu保留id/name/storage/coprocessors/busy/selectable，新增autoSelectable/taskId/output/outputQuantity/totalWork/completedWork/elapsedNanos/dashboardOrderId/canCancel。自动选择资格按当前Dashboard动作来源和AE选择模式判断，容量由计划bytes另行核对。未命名CPU的name可为空；无任务时taskId为空、output缺省、工作量为零。外部任务没有dashboardOrderId，canCancel=false；订单跨网络后也不能在新网络取消。
+
+CpuStatus包含cpuId/taskId/version/sampledAt/state/cantStoreItems/totalWork/completedWork/elapsedNanos/offset/total/entries/detailsAvailable/error。state为running/idle/unavailable；entries为item/stored/active/pending，分别表示CPU内部已存储、已发起等待返回、尚待执行的材料数量。空闲CPU仍可能有存料。工作量为AE归一化计数，不是成品数量；耗时单位纳秒，以字符串传输。
+
+状态只在游戏线程采样，2秒内复用不可变快照；LRU最多16份、32MiB，10秒未用过期。单份最多十万项/8MiB，超限detailsAvailable=false、error=STATUS_TOO_LARGE，摘要仍可用。每次核对当前网络与任务UUID，任务替换返回409 TASK_CHANGED，分页版本变化返回409 STATUS_CHANGED。页面不能混合不同任务/版本的窗口。明细与ETA不持久化，外部任务不导入历史。
+
+预计剩余按elapsedNanos*(totalWork-completedWork)/completedWork计算；无进度、离线/恢复、数据过期、cantStoreItems或连续30秒无进展时不提供有效估计。网页只随样本更新，不运行倒计时。
+
+容量错误NETWORK_PREVIEW_LIMIT/GLOBAL_PREVIEW_LIMIT/CRAFTING_QUEUE_BUSY/SUBMISSION_LIMIT/ACTIVE_ORDER_LIMIT分别表示网络预览、全局预览、原生命令、并行提交和活动订单限额，HTTP429附Retry-After；既有CRAFTING_BUSY仍保留客户端兼容文案。
 
 Order 包含 id/requestId/networkId/planId/item/quantity/requestedCpuId/cpuId/cpuName/nativeId/state/createdAt/updatedAt/finishedAt/error/total/progress。state 为 submitting、running、recovering、completed、cancelled、failed 或 unknown；total/progress 是工作项数量，不是成品数量。finishedAt=0 表示未结束。历史按 createdAt、id 倒序游标分页；结束30天后清理，活动订单不按时间清理，活动订单上限1024。
 
 先保存提交意图再调用 AE；同网络同 requestId 的重试返回同一订单，参数不同返回 REQUEST_CONFLICT。超时后查询 requestId，不自动生成新请求重下。确认未接受后，网页清除待确认请求，要求用户重新预览并手动提交。仅按原生 UUID 恢复；无法确认结果为 unknown，不将任务消失当完成。完成/取消由原生生命周期钩子提供，只处理 Dashboard 订单。跨网重组后保留原网络历史，拒绝跨网络取消。
 
 craftingEnabled=false 禁止创建预览和提交新订单，但允许查看历史及取消已有订单。craftingStatus 描述初始化、可用或持久化故障；持久化故障拒绝新下单，最新未写入状态保留并有界重试。
+
+## 会话持久化
+
+密码登录固定30天，不因闲置或服务器重启失效，不按读取请求滚动续期。服务端config/ae2-dashboard-sessions.json保存version=1、配置密码指纹和最多256个tokenHash/expiresAt，文件最大64KiB，不存原始密码或令牌。登录、退出和密码变更撤销均先原子发布再更新内存/Cookie；失败返回503 SESSION_STORAGE_UNAVAILABLE，不输出成功Cookie。文件损坏或未知版本拒绝初始化HTTP而保留原文件，采样继续；public模式不读写该文件。浏览器Web Storage不保存认证信息，任何认证恢复都不自动重放合成写请求。

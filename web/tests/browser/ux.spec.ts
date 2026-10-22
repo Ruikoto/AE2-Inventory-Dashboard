@@ -147,7 +147,10 @@ test("fluid display converts inventory, interval delta and rate together", async
 }) => {
   await dashboardFixture(page.context());
   await ready(page);
-  await page.getByLabel("资源类型").selectOption("fluid");
+  await page
+    .getByRole("radiogroup", { name: "资源类型" })
+    .getByRole("radio", { name: "流体", exact: true })
+    .click();
   await expect(page.locator(".inventory-row")).toHaveCount(1);
   await expect(page.locator(".inventory-row").first()).toContainText("甲水");
   await page.locator(".inventory-row").first().click();

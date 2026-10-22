@@ -46,7 +46,7 @@ class CraftingHttpTest {
           new Network(network, now, now, "online", Set.of("overworld 1,2,3")),
           "discovered",
           Set.of());
-      server = new DashboardHttp(service, config);
+      server = new DashboardHttp(service, config, directory.resolve("sessions.json"));
       server.start();
       base = "http://127.0.0.1:" + server.port();
       api = base + "/api/v1/networks/" + network + "/crafting";
@@ -93,6 +93,50 @@ class CraftingHttpTest {
     public void close() {
       server.close();
       service.close();
+    }
+  }
+
+  @Test
+  void capacityErrorsExplainQuotaAndReturnRetryAfter() throws Exception {
+    try (var f = new Fixture("public", true)) {
+      for (String code :
+          List.of(
+              "NETWORK_PREVIEW_LIMIT",
+              "GLOBAL_PREVIEW_LIMIT",
+              "CRAFTING_QUEUE_BUSY",
+              "SUBMISSION_LIMIT",
+              "ACTIVE_ORDER_LIMIT")) {
+        f.backend.planFailure = code;
+        var response =
+            f.post(f.api + "/plans", "{\"resourceId\":\"exact\",\"quantity\":\"1\"}", "");
+        assertEquals(429, response.statusCode(), response.body());
+        assertEquals(code, json(response).get("error").getAsString());
+        assertEquals(
+            code.endsWith("PREVIEW_LIMIT") ? "30" : "1",
+            response.headers().firstValue("Retry-After").orElseThrow());
+      }
+    }
+  }
+
+  @Test
+  void cpuStatusIsReadOnlyBoundedAndUsesTaskAndSnapshotIdentity() throws Exception {
+    try (var f = new Fixture("public", true)) {
+      String path = f.api + "/cpus/status?cpuId=cpu&taskId=&limit=120";
+      var status = f.send("GET", path, "", "", "", "");
+      assertEquals(200, status.statusCode(), status.body());
+      assertEquals("idle", json(status).get("state").getAsString());
+      assertTrue(json(status).get("detailsAvailable").getAsBoolean());
+      assertEquals(0, json(status).getAsJsonArray("entries").size());
+      assertEquals(
+          400, f.send("GET", path.replace("limit=120", "limit=121"), "", "", "", "").statusCode());
+      var changed = f.send("GET", path + "&version=2", "", "", "", "");
+      assertEquals(409, changed.statusCode());
+      assertEquals("STATUS_CHANGED", json(changed).get("error").getAsString());
+      var replaced =
+          f.send("GET", path.replace("taskId=", "taskId=" + UUID.randomUUID()), "", "", "", "");
+      assertEquals(409, replaced.statusCode());
+      assertEquals("TASK_CHANGED", json(replaced).get("error").getAsString());
+      assertEquals(405, f.post(path, "{}", "").statusCode());
     }
   }
 

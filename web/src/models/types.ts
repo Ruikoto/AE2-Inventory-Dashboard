@@ -20,6 +20,8 @@ export interface Resource {
   craftable?: boolean;
   infinite?: boolean;
   icon?: Icon;
+  overlay?: Icon;
+  quality?: number;
   statisticsFrom?: number;
   statisticsTo?: number;
   statisticsSamples?: number;

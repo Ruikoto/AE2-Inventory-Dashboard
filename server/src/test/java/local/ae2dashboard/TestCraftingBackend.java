@@ -12,6 +12,7 @@ public final class TestCraftingBackend implements CraftingService.Backend {
   public final AtomicInteger submits = new AtomicInteger(), cancels = new AtomicInteger();
   public CompletableFuture<Void> submitGate = CompletableFuture.completedFuture(null);
   public String failure = "";
+  public String planFailure = "";
 
   public TestCraftingBackend(CraftingService service) {
     this.service = service;
@@ -19,10 +20,37 @@ public final class TestCraftingBackend implements CraftingService.Backend {
 
   public CompletableFuture<List<Cpu>> cpus(String network) {
     return CompletableFuture.completedFuture(
-        List.of(new Cpu("cpu", "测试 CPU", "65536", 1, false, true)));
+        List.of(
+            new Cpu(
+                "cpu", "测试 CPU", "65536", 1, false, true, true, "", null, "0", "0", "0", "0", "",
+                false)));
+  }
+
+  public CompletableFuture<CpuStatus> cpuStatus(
+      String network, String cpuId, String taskId, int offset, int limit, Long version) {
+    if (version != null && version != 1)
+      return CompletableFuture.failedFuture(new Failure("STATUS_CHANGED"));
+    if (!taskId.isEmpty()) return CompletableFuture.failedFuture(new Failure("TASK_CHANGED"));
+    return CompletableFuture.completedFuture(
+        new CpuStatus(
+            cpuId,
+            "",
+            1,
+            System.currentTimeMillis(),
+            "idle",
+            false,
+            "0",
+            "0",
+            "0",
+            offset,
+            0,
+            List.of(),
+            true,
+            ""));
   }
 
   public CompletableFuture<Plan> createPlan(String network, String resource, String quantity) {
+    if (!planFailure.isEmpty()) return CompletableFuture.failedFuture(new Failure(planFailure));
     Plan plan =
         new Plan(
             UUID.randomUUID().toString(),
@@ -52,6 +80,7 @@ public final class TestCraftingBackend implements CraftingService.Backend {
 
   public CompletableFuture<Void> submit(Order order) {
     submits.incrementAndGet();
+    plans.remove(order.planId());
     if (!failure.isEmpty()) return CompletableFuture.failedFuture(new Failure(failure));
     service.update(
         new Order(
@@ -72,7 +101,6 @@ public final class TestCraftingBackend implements CraftingService.Backend {
             "",
             "128",
             "0"));
-    plans.remove(order.planId());
     return submitGate;
   }
 

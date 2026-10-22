@@ -103,3 +103,56 @@ describe("inventory index", () => {
     expect(index.filter({ ...defaults(), zeros: true })).toHaveLength(2);
   });
 });
+
+it("combines availability with favorites, infinity and exact large stock", () => {
+  const index = new InventoryIndex([
+    { ...row("huge", "9223372036854775807"), craftable: false },
+    { ...row("craft", "0"), craftable: true },
+    { ...row("both", "4"), craftable: true, infinite: true },
+    row("old", "0"),
+  ]);
+  expect(
+    index.filter({ ...defaults(), availability: "stock" }).map((r) => r.id),
+  ).toEqual(["huge", "both"]);
+  expect(
+    index
+      .filter({
+        ...defaults(),
+        availability: "craftable",
+        excludeInfinite: true,
+      })
+      .map((r) => r.id),
+  ).toEqual(["craft"]);
+  expect(
+    index
+      .filter({
+        ...defaults(),
+        availability: "craftable",
+        onlyFavorites: true,
+        favorites: ["huge", "both"],
+      })
+      .map((r) => r.id),
+  ).toEqual(["both"]);
+  expect(
+    index.filter({ ...defaults(), availability: "all", zeros: true }),
+  ).toHaveLength(4);
+});
+it("searches Chinese, full pinyin, initials and mixed registry names", () => {
+  const index = new InventoryIndex([
+    { ...row("wheat", "1"), name: "小麦种子" },
+    { ...row("mixed", "1"), name: "AE2 小麦种子12" },
+  ]);
+  for (const search of ["小麦", "xiaomai", "XMZZ", "xiao mai"])
+    expect(index.filter({ ...defaults(), search })).toHaveLength(2);
+  expect(
+    index.filter({ ...defaults(), search: "ae2xmzz12" }).map((r) => r.id),
+  ).toEqual(["mixed"]);
+  expect(
+    index
+      .filter({ ...defaults(), search: "ae2xiaomaizhongzi12" })
+      .map((r) => r.id),
+  ).toEqual(["mixed"]);
+  expect(
+    index.filter({ ...defaults(), search: "minecraft:wheat" }).map((r) => r.id),
+  ).toEqual(["wheat"]);
+});

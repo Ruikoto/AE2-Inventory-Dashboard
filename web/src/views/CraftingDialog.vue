@@ -2,6 +2,8 @@
 import { ref, watch } from "vue";
 import type { CraftingViewModel } from "../viewmodels/crafting";
 import { quantity } from "../models/format";
+import CraftingMaterialGrid from "./CraftingMaterialGrid.vue";
+import ResourceIcon from "./ResourceIcon.vue";
 const props = defineProps<{ vm: CraftingViewModel }>();
 const {
   dialogOpen,
@@ -19,13 +21,24 @@ const {
   validAmount,
   canSubmit,
   pendingRequest,
+  cpuProblem,
+  eligibleCpus,
+  materialSearch,
+  onlyMissing,
+  previewMaterials,
 } = props.vm;
 const dialog = ref<HTMLDialogElement>();
+let opener: HTMLElement | null = null;
 watch(
   dialogOpen,
   (open) => {
-    if (open) dialog.value?.showModal();
-    else dialog.value?.close();
+    if (open) {
+      opener = document.activeElement as HTMLElement;
+      dialog.value?.showModal();
+    } else {
+      dialog.value?.close();
+      if (opener?.isConnected) opener.focus();
+    }
   },
   { flush: "post" },
 );
@@ -41,7 +54,11 @@ watch(
     <div class="dialog-heading">
       <div>
         <p class="dialog-context">自动合成</p>
-        <h2 id="craft-title">{{ item?.name || "选择精确变体" }}</h2>
+        <h2 id="craft-title" class="craft-title">
+          <ResourceIcon v-if="item" :row="item" :size="32" />{{
+            item?.name || "选择精确变体"
+          }}
+        </h2>
       </div>
       <button class="icon-button" aria-label="关闭下单" @click="vm.closeDialog">
         ×
@@ -107,31 +124,22 @@ watch(
           <h3>材料预览</h3>
           <span>合成空间 {{ quantity(plan.bytes || "0") }} B</span>
         </div>
-        <div class="materials-scroll">
-          <table class="material-table">
-            <thead>
-              <tr>
-                <th>材料</th>
-                <th>已有</th>
-                <th>合成</th>
-                <th>缺少</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="material in plan.materials" :key="material.item.id">
-                <th scope="row" :title="material.item.registryId">
-                  {{ material.item.name
-                  }}<small>{{ material.item.unit }}</small>
-                </th>
-                <td>{{ quantity(material.stored) }}</td>
-                <td>{{ quantity(material.craft) }}</td>
-                <td :class="{ negative: BigInt(material.missing) > 0n }">
-                  {{ quantity(material.missing) }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="material-toolbar">
+          <input
+            v-model="materialSearch"
+            aria-label="搜索预览材料"
+            placeholder="搜索材料"
+          />
+          <label class="check"
+            ><input v-model="onlyMissing" type="checkbox" />仅缺少</label
+          >
+          <span>{{ previewMaterials.length.toLocaleString() }} 种材料</span>
         </div>
+        <CraftingMaterialGrid
+          :entries="previewMaterials"
+          mode="preview"
+          :reset-key="[plan.id, materialSearch, onlyMissing].join(':')"
+        />
         <p v-if="plan.state === 'missing'" class="error-text craft-error">
           材料不足，补齐后请重新预览。
         </p>
@@ -141,7 +149,10 @@ watch(
         >
           此预览不可提交，请重新计算。
         </p>
-        <label v-if="plan.state === 'ready'" class="cpu-picker"
+        <label
+          v-if="plan.state === 'ready'"
+          class="cpu-picker"
+          :class="{ blocked: cpuProblem }"
           >合成 CPU
           <select
             v-model="cpuId"
@@ -154,12 +165,11 @@ watch(
               :key="cpu.id"
               :value="cpu.id"
               :disabled="
-                !cpu.selectable ||
-                cpu.busy ||
-                BigInt(cpu.storage) < BigInt(plan.bytes)
+                !eligibleCpus.some((candidate) => candidate.id === cpu.id)
               "
             >
-              {{ cpu.name || "未命名 CPU" }} · {{ quantity(cpu.storage) }} B{{
+              {{ cpu.name || "未命名 CPU" }} · {{ quantity(cpu.storage) }} B ·
+              {{ cpu.coprocessors }} 协处理器{{
                 cpu.busy
                   ? " · 占用中"
                   : !cpu.selectable
@@ -171,6 +181,9 @@ watch(
             </option>
           </select>
         </label>
+        <p v-if="cpuProblem" class="error-text cpu-problem" role="status">
+          {{ cpuProblem }}
+        </p>
       </template>
     </div>
     <div v-else-if="!busy" class="plan-empty">

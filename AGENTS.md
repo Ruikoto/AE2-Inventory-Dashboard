@@ -6,7 +6,7 @@
 
 1. 确认当前路径属于本独立仓库，检查 Git 状态，保留其他任务的变更。
 2. 先读 [README](README.md)、[交接状态](docs/HANDOFF.md)；修改前读 [实施基线](docs/IMPLEMENTATION_PLAN.md)、[验收清单](docs/ACCEPTANCE.md) 及对应模块协议。
-3. 统计以 [0.1.2 实施约定](docs/UX_012_PLAN.md) 为依据；网格、无限项和合成订单以 [0.1.3 实施约定](docs/CRAFTING_013_PLAN.md)、[协议](docs/PROTOCOL.md) 为依据。原始完整计划不能覆盖后续确认的行为。
+3. 统计以 [0.1.2 实施约定](docs/UX_012_PLAN.md) 为依据；网格、无限项和合成订单以 [0.1.3 实施约定](docs/CRAFTING_013_PLAN.md) 为基础，品质显示、持久登录、预览生命周期和CPU视图以 [0.1.4实施约定](docs/UX_014_PLAN.md)、[协议](docs/PROTOCOL.md) 为准。原始完整计划不能覆盖后续确认的行为。
 4. 简述本次目标、修改模块、验证及交付范围。普通实现选择自行决定；只有影响已确认行为、架构或交付边界的未知项才需要澄清。
 5. [验证记录](docs/VALIDATION.md)、[0.1.2 验证](docs/UX_012_VALIDATION.md) 和 [0.1.3 验证](docs/CRAFTING_013_VALIDATION.md) 是有日期的证据，不是当前服务器状态，也不是所有未来修改的通过证明。
 

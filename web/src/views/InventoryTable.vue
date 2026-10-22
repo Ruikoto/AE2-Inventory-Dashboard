@@ -25,6 +25,7 @@ const emit = defineEmits<{
   compare: [id: string];
   select: [row: Resource];
   craft: [row: Resource];
+  clearFilters: [];
   window: [start: number, count: number, columns: number, firstVisible: number];
 }>();
 const ROW_HEIGHT = 64;
@@ -162,6 +163,7 @@ onUnmounted(() => {
     <div v-if="!total" class="empty">
       <strong>没有匹配的资源</strong>
       <p>调整搜索或筛选条件</p>
+      <button @click="emit('clearFilters')">清除筛选</button>
     </div>
   </div>
 </template>

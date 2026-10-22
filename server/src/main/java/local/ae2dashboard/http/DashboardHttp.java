@@ -6,13 +6,17 @@ import java.io.*;
 import java.math.BigInteger;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import local.ae2dashboard.*;
 import local.ae2dashboard.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class DashboardHttp implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger("ae2dashboard");
   private final DashboardService service;
   private final Config config;
   private final Sessions sessions;
@@ -41,10 +45,12 @@ public final class DashboardHttp implements AutoCloseable {
             return t;
           });
 
-  public DashboardHttp(DashboardService service, Config config) throws IOException {
+  public DashboardHttp(DashboardService service, Config config, Path sessionFile)
+      throws IOException {
     this.service = service;
     this.config = config;
-    this.sessions = new Sessions(config.password(), config.authMode().equals("public"));
+    this.sessions =
+        new Sessions(config.password(), config.authMode().equals("public"), sessionFile);
     server = HttpServer.create(new InetSocketAddress(config.bindAddress(), config.port()), 32);
     server.setExecutor(executor);
     server.createContext("/", this::handle);
@@ -270,7 +276,18 @@ public final class DashboardHttp implements AutoCloseable {
       }
       error(exchange, 404, "NOT_FOUND");
     } catch (Crafting.Failure e) {
+      if (craftingStatus(e.code()) == 429)
+        exchange
+            .getResponseHeaders()
+            .set(
+                "Retry-After",
+                Set.of("NETWORK_PREVIEW_LIMIT", "GLOBAL_PREVIEW_LIMIT").contains(e.code())
+                    ? "30"
+                    : "1");
       safeError(exchange, craftingStatus(e.code()), e.code());
+    } catch (Sessions.StorageFailure e) {
+      LOG.error("Browser session persistence failed", e);
+      safeError(exchange, 503, "SESSION_STORAGE_UNAVAILABLE");
     } catch (History.SnapshotChanged e) {
       safeError(exchange, 409, "SNAPSHOT_CHANGED");
     } catch (History.InvalidGranularity e) {
@@ -320,7 +337,11 @@ public final class DashboardHttp implements AutoCloseable {
     CraftingService crafting = service.crafting();
     if (parts.length == 7) {
       switch (parts[6]) {
-        case "cpus" -> json(exchange, 200, Map.of("cpus", await(crafting.cpus(network))));
+        case "cpus" ->
+            json(
+                exchange,
+                200,
+                Map.of("cpus", await(crafting.cpus(network)).stream().map(this::cpu).toList()));
         case "plans" -> {
           if (!method.equals("POST")) {
             methodNotAllowed(exchange, "POST");
@@ -329,25 +350,27 @@ public final class DashboardHttp implements AutoCloseable {
           json(
               exchange,
               202,
-              await(
-                  crafting.createPlan(
-                      network,
-                      string(input, "resourceId", false),
-                      string(input, "quantity", false))));
+              plan(
+                  await(
+                      crafting.createPlan(
+                          network,
+                          string(input, "resourceId", false),
+                          string(input, "quantity", false)))));
         }
         case "orders" -> {
           if (method.equals("POST")) {
             json(
                 exchange,
                 202,
-                await(
-                    crafting.submit(
-                        network,
-                        string(input, "planId", false),
-                        string(input, "cpuId", true),
-                        string(input, "requestId", false))));
+                order(
+                    await(
+                        crafting.submit(
+                            network,
+                            string(input, "planId", false),
+                            string(input, "cpuId", true),
+                            string(input, "requestId", false)))));
           } else if (query.containsKey("requestId")) {
-            json(exchange, 200, crafting.byRequest(network, query.get("requestId")));
+            json(exchange, 200, orders(crafting.byRequest(network, query.get("requestId"))));
           } else {
             String history = query.getOrDefault("history", "false");
             if (!Set.of("true", "false").contains(history))
@@ -355,28 +378,42 @@ public final class DashboardHttp implements AutoCloseable {
             json(
                 exchange,
                 200,
-                crafting.orders(
-                    network,
-                    Boolean.parseBoolean(history),
-                    integer(query, "limit", 50, 1, 100),
-                    query.getOrDefault("cursor", "")));
+                orders(
+                    crafting.orders(
+                        network,
+                        Boolean.parseBoolean(history),
+                        integer(query, "limit", 50, 1, 100),
+                        query.getOrDefault("cursor", ""))));
           }
         }
         default -> error(exchange, 404, "NOT_FOUND");
       }
+    } else if (parts.length == 8 && parts[6].equals("cpus") && parts[7].equals("status")) {
+      json(
+          exchange,
+          200,
+          cpuStatus(
+              await(
+                  crafting.cpuStatus(
+                      network,
+                      query.getOrDefault("cpuId", ""),
+                      query.getOrDefault("taskId", ""),
+                      integer(query, "offset", 0, 0, 100000),
+                      integer(query, "limit", 120, 1, 120),
+                      query.containsKey("version") ? number(query, "version", 0) : null))));
     } else if (parts.length == 8 && parts[6].equals("plans")) {
       if (method.equals("DELETE")) {
         await(crafting.cancelPlan(network, parts[7]));
         json(exchange, 200, Map.of("cancelled", true));
-      } else json(exchange, 200, await(crafting.plan(network, parts[7])));
+      } else json(exchange, 200, plan(await(crafting.plan(network, parts[7]))));
     } else if (parts.length == 8 && parts[6].equals("orders")) {
-      json(exchange, 200, crafting.order(network, parts[7]));
+      json(exchange, 200, order(crafting.order(network, parts[7])));
     } else if (parts.length == 9 && parts[6].equals("orders") && parts[8].equals("cancel")) {
       if (!method.equals("POST")) {
         methodNotAllowed(exchange, "POST");
         return;
       }
-      json(exchange, 200, await(crafting.cancel(network, parts[7])));
+      json(exchange, 200, order(await(crafting.cancel(network, parts[7]))));
     } else error(exchange, 404, "NOT_FOUND");
   }
 
@@ -414,7 +451,13 @@ public final class DashboardHttp implements AutoCloseable {
       case "PLAN_NOT_FOUND", "ORDER_NOT_FOUND", "NETWORK_NOT_FOUND", "RESOURCE_NOT_FOUND" -> 404;
       case "REQUEST_TOO_LARGE" -> 413;
       case "UNSUPPORTED_MEDIA_TYPE" -> 415;
-      case "CRAFTING_BUSY" -> 429;
+      case "CRAFTING_BUSY",
+          "NETWORK_PREVIEW_LIMIT",
+          "GLOBAL_PREVIEW_LIMIT",
+          "CRAFTING_QUEUE_BUSY",
+          "SUBMISSION_LIMIT",
+          "ACTIVE_ORDER_LIMIT" ->
+          429;
       case "CRAFTING_UNAVAILABLE",
           "CRAFTING_INITIALIZING",
           "CRAFTING_STORAGE_UNAVAILABLE",
@@ -591,31 +634,83 @@ public final class DashboardHttp implements AutoCloseable {
     row.put("registryId", resource.registryId());
     row.put("unit", resource.unit());
     row.put("amountPerUnit", resource.amountPerUnit());
-    var mapping = service.assets().entry(resource.id());
-    if (mapping != null
-        && (!mapping.registryId().equals(resource.registryId())
-            || !mapping.type().equals(resource.type()))) mapping = null;
-    row.put("name", mapping == null ? resource.name() : mapping.name());
-    if (mapping != null
-        && service.assets().hasIcon(resource.id())
-        && mapping.registryId().equals(resource.registryId())
-        && mapping.type().equals(resource.type())) {
-      var page = service.assets().page(mapping.page());
-      row.put(
-          "icon",
-          Map.of(
-              "url",
-              "api/v1/assets/" + mapping.page() + ".png",
-              "x",
-              mapping.x(),
-              "y",
-              mapping.y(),
-              "width",
-              page.width(),
-              "height",
-              page.height()));
-    }
+    display(row, service.presentation().display(resource));
     return row;
+  }
+
+  private void display(
+      Map<String, Object> row, local.ae2dashboard.assets.Presentation.Display display) {
+    row.put("name", display.name());
+    row.put("quality", display.quality());
+    if (display.icon() != null) row.put("icon", display.icon());
+    if (display.overlay() != null) row.put("overlay", display.overlay());
+  }
+
+  private JsonElement item(Crafting.Item item) {
+    Map<String, Object> row = new LinkedHashMap<>();
+    row.put("id", item.id());
+    row.put("unit", item.unit());
+    row.put("type", item.type());
+    row.put("registryId", item.registryId());
+    display(row, service.presentation().display(item));
+    return gson.toJsonTree(row);
+  }
+
+  private JsonObject plan(Crafting.Plan plan) {
+    var result = gson.toJsonTree(plan).getAsJsonObject();
+    result.add("item", item(plan.item()));
+    var materials = result.getAsJsonArray("materials");
+    for (int i = 0; i < plan.materials().size(); i++)
+      materials.get(i).getAsJsonObject().add("item", item(plan.materials().get(i).item()));
+    return result;
+  }
+
+  private JsonObject cpu(Crafting.Cpu cpu) {
+    var result = gson.toJsonTree(cpu).getAsJsonObject();
+    if (cpu.output() != null) result.add("output", item(cpu.output()));
+    return result;
+  }
+
+  private JsonObject cpuStatus(Crafting.CpuStatus status) {
+    var result = gson.toJsonTree(status).getAsJsonObject();
+    var entries = result.getAsJsonArray("entries");
+    for (int i = 0; i < status.entries().size(); i++)
+      entries.get(i).getAsJsonObject().add("item", item(status.entries().get(i).item()));
+    return result;
+  }
+
+  private Map<String, Resource> legacyResources(List<Crafting.Order> orders)
+      throws java.sql.SQLException {
+    var ids =
+        orders.stream()
+            .map(Crafting.Order::item)
+            .filter(item -> item.baseDisplayId() == null)
+            .map(Crafting.Item::id)
+            .distinct()
+            .toList();
+    return service.store().resourcesByIds(ids);
+  }
+
+  private JsonObject order(Crafting.Order order) throws java.sql.SQLException {
+    return order(order, legacyResources(List.of(order)));
+  }
+
+  private JsonObject order(Crafting.Order order, Map<String, Resource> resources) {
+    var result = gson.toJsonTree(order).getAsJsonObject();
+    var resource = resources.get(order.item().id());
+    result.add(
+        "item", item(resource == null ? order.item() : service.presentation().item(resource)));
+    return result;
+  }
+
+  private JsonObject orders(Crafting.OrderPage page) throws java.sql.SQLException {
+    var resources = legacyResources(page.orders());
+    var result = new JsonObject();
+    result.addProperty("nextCursor", page.nextCursor());
+    var orders = new JsonArray();
+    for (var order : page.orders()) orders.add(order(order, resources));
+    result.add("orders", orders);
+    return result;
   }
 
   private void session(HttpExchange exchange, String token, long now) throws IOException {
@@ -649,7 +744,7 @@ public final class DashboardHttp implements AutoCloseable {
         error(exchange, 400, "INVALID_REQUEST");
       }
     } else if (exchange.getRequestMethod().equals("DELETE")) {
-      sessions.logout(token);
+      sessions.logout(token, now);
       exchange.getResponseHeaders().add("Set-Cookie", cookieValue("", true));
       json(exchange, 200, Map.of("authenticated", false));
     } else {
@@ -663,7 +758,8 @@ public final class DashboardHttp implements AutoCloseable {
         + token
         + "; Path=/; HttpOnly; SameSite=Strict"
         + (config.secureCookie() ? "; Secure" : "")
-        + (clear ? "; Max-Age=0" : "");
+        + "; Max-Age="
+        + (clear ? 0 : Sessions.LIFETIME_SECONDS);
   }
 
   private boolean sameOrigin(HttpExchange exchange) {

@@ -5,6 +5,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import local.ae2dashboard.assets.AssetPack;
+import local.ae2dashboard.assets.Presentation;
 import local.ae2dashboard.model.*;
 import local.ae2dashboard.storage.HistoryStore;
 import org.slf4j.Logger;
@@ -15,6 +16,7 @@ public final class DashboardService implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger("ae2dashboard");
   private final HistoryStore store;
   private final AssetPack assets;
+  private final Presentation presentation;
   private final CraftingService crafting;
   private final ThreadPoolExecutor writer =
       new ThreadPoolExecutor(
@@ -55,6 +57,12 @@ public final class DashboardService implements AutoCloseable {
   private volatile String httpStatus = "starting";
 
   public DashboardService(Path world, Config config) throws Exception {
+    this(world, config, resource -> DisplayHint.NONE);
+  }
+
+  public DashboardService(
+      Path world, Config config, java.util.function.Function<Resource, DisplayHint> displayHints)
+      throws Exception {
     store =
         new HistoryStore(
             world.resolve("ae2-dashboard"),
@@ -62,6 +70,7 @@ public final class DashboardService implements AutoCloseable {
             config.sampleIntervalSeconds() * 1000L);
     for (Network n : store.networks()) networks.put(n.id(), n);
     assets = AssetPack.load(config.assetPack());
+    presentation = new Presentation(assets, displayHints);
     crafting = new CraftingService(this, config);
     // 后台恢复显示信息；只排一个任务，避免把历史网络数误算为丢样。
     writer.execute(
@@ -90,6 +99,10 @@ public final class DashboardService implements AutoCloseable {
 
   public AssetPack assets() {
     return assets;
+  }
+
+  public Presentation presentation() {
+    return presentation;
   }
 
   public CraftingService crafting() {

@@ -6,10 +6,58 @@ import java.util.List;
 public final class Crafting {
   private Crafting() {}
 
-  public record Item(String id, String name, String unit, String type, String registryId) {}
+  public record Item(
+      String id,
+      String name,
+      String unit,
+      String type,
+      String registryId,
+      String baseDisplayId,
+      int quality) {
+    public Item(String id, String name, String unit, String type, String registryId) {
+      this(id, name, unit, type, registryId, null, 0);
+    }
+  }
 
   public record Cpu(
-      String id, String name, String storage, int coprocessors, boolean busy, boolean selectable) {}
+      String id,
+      String name,
+      String storage,
+      int coprocessors,
+      boolean busy,
+      boolean selectable,
+      boolean autoSelectable,
+      String taskId,
+      Item output,
+      String outputQuantity,
+      String totalWork,
+      String completedWork,
+      String elapsedNanos,
+      String dashboardOrderId,
+      boolean canCancel) {}
+
+  public record CpuMaterial(Item item, String stored, String active, String pending) {}
+
+  /** CPU 明细只在内存中缓存，绝不作为订单历史写入数据库。 */
+  public record CpuStatus(
+      String cpuId,
+      String taskId,
+      long version,
+      long sampledAt,
+      String state,
+      boolean cantStoreItems,
+      String totalWork,
+      String completedWork,
+      String elapsedNanos,
+      int offset,
+      int total,
+      List<CpuMaterial> entries,
+      boolean detailsAvailable,
+      String error) {
+    public CpuStatus {
+      entries = List.copyOf(entries);
+    }
+  }
 
   public record Material(Item item, String stored, String craft, String missing) {}
 

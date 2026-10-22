@@ -3,6 +3,7 @@ export interface Preferences {
   comparisons: string[];
   search: string;
   type: string;
+  availability: "all" | "stock" | "craftable";
   namespace: string;
   merged: boolean;
   onlyFavorites: boolean;
@@ -23,6 +24,7 @@ export const defaults = (): Preferences => ({
   comparisons: [],
   search: "",
   type: "all",
+  availability: "all",
   namespace: "",
   merged: false,
   onlyFavorites: false,
@@ -64,6 +66,8 @@ export function loadPreferences(
       output.sort = input.sort;
     if (["grid", "list"].includes(input.inventoryView))
       output.inventoryView = input.inventoryView;
+    if (["all", "stock", "craftable"].includes(input.availability))
+      output.availability = input.availability;
     if (["quantity", "rate", "both"].includes(input.mode))
       output.mode = input.mode;
     if ([60000, 300000, 900000].includes(input.rateWindow))
@@ -97,8 +101,7 @@ export function loadPreferences(
             (other) => other.startsWith("group:") === id.startsWith("group:"),
           ).length < 6,
     );
-    if (!["all", "item", "fluid", "other"].includes(output.type))
-      output.type = "all";
+    if (!["all", "item", "fluid"].includes(output.type)) output.type = "all";
     return output;
   } catch {
     return defaults();

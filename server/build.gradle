@@ -26,7 +26,7 @@ sourceSets {
     test { java.setSrcDirs([]) }
     core { java { srcDir 'src/main/java'; exclude 'local/ae2dashboard/forge/**' } }
     coreTest { java.srcDir 'src/test/java'; compileClasspath += sourceSets.core.output; runtimeClasspath += sourceSets.core.output }
-    nativeTest { java.srcDir 'src/nativeTest/java'; compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath; runtimeClasspath += sourceSets.main.output + sourceSets.main.compileClasspath }
+    nativeTest { java.srcDir 'src/nativeTest/java'; compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath; runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath }
 }
 dependencies {
     coreImplementation project(':contracts')
