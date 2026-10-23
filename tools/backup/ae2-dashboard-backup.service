@@ -1,0 +1,13 @@
+[Unit]
+Description=AE2 Dashboard SQLite consistent backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ae2-dashboard-backup.env
+ExecStart=/usr/bin/python3 /usr/local/lib/ae2-dashboard/history_backup.py --world ${DASHBOARD_WORLD} --timeout 240
+TimeoutStartSec=300
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true

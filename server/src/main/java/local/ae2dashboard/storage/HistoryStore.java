@@ -12,9 +12,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import local.ae2dashboard.io.BoundedOutputStream;
 import local.ae2dashboard.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Owned by one writer. Readers use independent, short-lived query-only connections. */
 public final class HistoryStore implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger("ae2dashboard");
   // 仅把显示所需的品质候选身份带回内部；HTTP始终显式排除identity。
   private static final String DISPLAY_RESOURCE_COLUMNS =
       "r.id,r.group_id,r.type,r.registry_id,r.name,r.unit,r.amount_per_unit,"
@@ -40,6 +43,13 @@ public final class HistoryStore implements AutoCloseable {
   private final AtomicLong revisionSequence = new AtomicLong(System.currentTimeMillis());
   private volatile String appendingNetwork;
   private volatile boolean maintaining;
+  private long appendTransactions, appendFailures, appendNanos, appendMaxNanos;
+  private final AtomicLong readCount = new AtomicLong();
+  private final AtomicLong readNanos = new AtomicLong();
+  private final AtomicLong readMaxNanos = new AtomicLong();
+  private final AtomicLong readBusy = new AtomicLong();
+  private final AtomicLong readFailures = new AtomicLong();
+  private final AtomicLong readCancelled = new AtomicLong();
 
   public HistoryStore(Path directory, long budgetBytes) throws SQLException, IOException {
     this(directory, budgetBytes, 10_000);
@@ -301,6 +311,7 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   public void append(Snapshot sample) throws SQLException, IOException {
+    long started = System.nanoTime();
     ensureWriter();
     maintain(sample.timestamp());
     long total = directoryBytes();
@@ -346,6 +357,7 @@ public final class HistoryStore implements AutoCloseable {
     if (continuous) keys.addAll(old.values().keySet());
     budgetInterrupted = false;
     appendingNetwork = sample.networkId();
+    boolean committed = false;
     try (var transaction = transaction(true)) {
       update(
           writer,
@@ -403,6 +415,7 @@ public final class HistoryStore implements AutoCloseable {
           sample.timestamp(),
           sample.networkId());
       transaction.commit();
+      committed = true;
       var replaced = previous.put(sample.networkId(), sample);
       previousBytes += sample.estimatedBytes() - (replaced == null ? 0 : replaced.estimatedBytes());
       while (previous.size() > 128 || previousBytes > 512L * 1024 * 1024) {
@@ -420,6 +433,11 @@ public final class HistoryStore implements AutoCloseable {
       status = budgetInterrupted ? "paused:space" : "paused:write";
       throw e;
     } finally {
+      long elapsed = System.nanoTime() - started;
+      appendTransactions++;
+      if (!committed) appendFailures++;
+      appendNanos += elapsed;
+      appendMaxNanos = Math.max(appendMaxNanos, elapsed);
       statisticsRevisions.put(sample.networkId(), revisionSequence.incrementAndGet());
       appendingNetwork = null;
     }
@@ -674,13 +692,22 @@ public final class HistoryStore implements AutoCloseable {
         var operation = lease.operation()) {
       c.setAutoCommit(false);
       try {
-        long start = Math.max(from, retainedFrom);
-        List<Coverage> coverage = coverage(c, network, start, to, tier);
+        long retained = retainedFrom;
+        long start = Math.max(from, retained);
+        long readStart = Math.max(0, Math.max(retained, from - Math.max(tier, rateWindow)));
+        List<Coverage> coverage = coverage(c, network, readStart, to, tier);
         List<History.Series> output = new ArrayList<>();
         String table = tier == 10_000 ? "raw_changes" : tier == 60_000 ? "rollup_1m" : "rollup_15m";
         for (String id : ids)
-          output.add(readSeries(c, table, network, id, coverage, from, to, step, tier, rateWindow));
-        long available = coverage.isEmpty() ? to : coverage.get(0).first();
+          output.add(
+              readSeries(
+                  c, table, network, id, coverage, readStart, from, to, step, tier, rateWindow));
+        long available =
+            coverage.stream()
+                .filter(cv -> cv.first() >= start)
+                .mapToLong(Coverage::first)
+                .findFirst()
+                .orElse(to);
         var result =
             new History.Result(
                 from,
@@ -692,6 +719,7 @@ public final class HistoryStore implements AutoCloseable {
         c.commit();
         return result;
       } catch (SQLException | RuntimeException e) {
+        recordReadFailure(e);
         operation.close();
         try {
           c.rollback();
@@ -711,7 +739,7 @@ public final class HistoryStore implements AutoCloseable {
             ? "SELECT segment,t AS bucket,t AS first_at,t AS last_at,1 AS samples FROM"
                 + " sample_frames WHERE network=? AND t>=? AND t<=? ORDER BY t LIMIT 260000"
             : "SELECT * FROM coverage WHERE network=? AND tier=? AND bucket>=? AND bucket<=?"
-                + " ORDER BY bucket,segment LIMIT 260000";
+                + " ORDER BY bucket,first_at,last_at,segment LIMIT 260000";
     Object[] coverageArgs =
         tier == 10_000
             ? new Object[] {network, start, to}
@@ -840,6 +868,7 @@ public final class HistoryStore implements AutoCloseable {
             || statisticsRevisions.get(network) != version) throw new History.SnapshotChanged();
         return new History.StatisticsPage(version, total, output);
       } catch (SQLException | RuntimeException e) {
+        recordReadFailure(e);
         operation.close();
         try {
           c.rollback();
@@ -866,6 +895,7 @@ public final class HistoryStore implements AutoCloseable {
       String network,
       String id,
       List<Coverage> coverage,
+      long readStart,
       long from,
       long to,
       long step,
@@ -897,7 +927,7 @@ public final class HistoryStore implements AutoCloseable {
                   network,
                   id,
                   segment,
-                  from / tier * tier);
+                  readStart / tier * tier);
           var r = s.executeQuery()) {
         if (r.next()) list.add(change(r));
       }
@@ -914,7 +944,7 @@ public final class HistoryStore implements AutoCloseable {
                   network,
                   id,
                   segment,
-                  from / tier * tier,
+                  readStart / tier * tier,
                   to);
           var r = s.executeQuery()) {
         while (r.next()) {
@@ -933,9 +963,6 @@ public final class HistoryStore implements AutoCloseable {
     BigInteger first = null, last = null, min = null, max = null;
     int gap = 0;
     for (Coverage cv : coverage) {
-      if (cv.first() > to
-          || cv.last() < from
-          || (tier > 10_000 && (cv.first() < from || cv.last() > to))) continue;
       checkInterrupted();
       List<Change> list = changes.get(cv.segment());
       int index = cursors.getOrDefault(cv.segment(), 0);
@@ -1196,6 +1223,7 @@ public final class HistoryStore implements AutoCloseable {
         c.commit();
         return new StoredInventory(timestamp, List.copyOf(rows), total);
       } catch (SQLException | RuntimeException e) {
+        recordReadFailure(e);
         operation.close();
         try {
           c.rollback();
@@ -1422,6 +1450,9 @@ public final class HistoryStore implements AutoCloseable {
 
   public void maintain(long now) throws SQLException, IOException {
     if (now - lastMaintenance < 60_000) return;
+    long started = System.nanoTime(), phase = started;
+    long activityNanos = 0, pruneNanos = 0, capacityNanos = 0, cleanupNanos = 0;
+    boolean completed = false;
     lastMaintenance = now;
     ensureWriter();
     maintaining = true;
@@ -1443,6 +1474,8 @@ public final class HistoryStore implements AutoCloseable {
         }
         lastActivityRefresh = now;
       }
+      activityNanos = System.nanoTime() - phase;
+      phase = System.nanoTime();
       List<String[]> expired = new ArrayList<>();
       try (var s =
               prepare(
@@ -1483,7 +1516,9 @@ public final class HistoryStore implements AutoCloseable {
           writer,
           "DELETE FROM crafting_orders WHERE finished>0 AND finished<?",
           now - 30 * History.DAY);
-      execute(writer, "PRAGMA wal_checkpoint(PASSIVE)");
+      pruneNanos = System.nanoTime() - phase;
+      checkpoint("PASSIVE");
+      phase = System.nanoTime();
       bytes = directoryBytes();
       long page = scalar(writer, "PRAGMA page_size"),
           free = scalar(writer, "PRAGMA freelist_count") * page;
@@ -1507,6 +1542,8 @@ public final class HistoryStore implements AutoCloseable {
             "UPDATE meta SET value=? WHERE key='retainedFrom'",
             Long.toString(retainedFrom));
       }
+      capacityNanos = System.nanoTime() - phase;
+      phase = System.nanoTime();
       update(
           writer,
           "DELETE FROM series WHERE NOT EXISTS(SELECT 1 FROM raw_changes r WHERE"
@@ -1518,7 +1555,7 @@ public final class HistoryStore implements AutoCloseable {
           writer,
           "DELETE FROM resources WHERE NOT EXISTS(SELECT 1 FROM series s WHERE"
               + " s.resource=resources.id)");
-      execute(writer, "PRAGMA wal_checkpoint(TRUNCATE)");
+      checkpoint("TRUNCATE");
       update(
           writer,
           "DELETE FROM controller_anchors WHERE network IN(SELECT id FROM networks WHERE"
@@ -1538,6 +1575,8 @@ public final class HistoryStore implements AutoCloseable {
               + " s.network=inventory_capabilities.network AND"
               + " s.resource=inventory_capabilities.resource)");
       bytes = directoryBytes();
+      cleanupNanos = System.nanoTime() - phase;
+      completed = true;
     } catch (SQLException | RuntimeException e) {
       try {
         discardWriter();
@@ -1548,6 +1587,53 @@ public final class HistoryStore implements AutoCloseable {
     } finally {
       statisticsRevisions.replaceAll((network, revision) -> revisionSequence.incrementAndGet());
       maintaining = false;
+      // 每轮维护只汇总一次累计计数，不记录资源、数量或身份数据。
+      LOG.debug(
+          "History maintenance completed={} elapsedMs={} activityMs={} pruneMs={} capacityMs={}"
+              + " cleanupMs={} bytes={} appendTransactions={} appendFailures={} appendTotalMs={}"
+              + " appendMaxMs={} reads={} readTotalMs={} readMaxMs={} readerBusy={} readFailures={}"
+              + " readCancelled={}",
+          completed,
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+          TimeUnit.NANOSECONDS.toMillis(activityNanos),
+          TimeUnit.NANOSECONDS.toMillis(pruneNanos),
+          TimeUnit.NANOSECONDS.toMillis(capacityNanos),
+          TimeUnit.NANOSECONDS.toMillis(cleanupNanos),
+          bytes,
+          appendTransactions,
+          appendFailures,
+          TimeUnit.NANOSECONDS.toMillis(appendNanos),
+          TimeUnit.NANOSECONDS.toMillis(appendMaxNanos),
+          readCount.get(),
+          TimeUnit.NANOSECONDS.toMillis(readNanos.get()),
+          TimeUnit.NANOSECONDS.toMillis(readMaxNanos.get()),
+          readBusy.get(),
+          readFailures.get(),
+          readCancelled.get());
+    }
+  }
+
+  private void checkpoint(String mode) throws SQLException {
+    long started = System.nanoTime();
+    int busy = -1, frames = -1, checkpointed = -1;
+    try {
+      checkInterrupted();
+      try (var s = writer.createStatement();
+          var r = s.executeQuery("PRAGMA wal_checkpoint(" + mode + ")")) {
+        if (r.next()) {
+          busy = r.getInt(1);
+          frames = r.getInt(2);
+          checkpointed = r.getInt(3);
+        }
+      }
+    } finally {
+      LOG.debug(
+          "History checkpoint mode={} elapsedMs={} busy={} frames={} checkpointed={}",
+          mode,
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+          busy,
+          frames,
+          checkpointed);
     }
   }
 
@@ -1578,7 +1664,7 @@ public final class HistoryStore implements AutoCloseable {
   }
 
   private record ReadLease(
-      Connection connection, SqliteWatchdog.Operation operation, Semaphore permits)
+      Connection connection, SqliteWatchdog.Operation operation, HistoryStore owner, long started)
       implements AutoCloseable {
     @Override
     public void close() throws SQLException {
@@ -1586,16 +1672,24 @@ public final class HistoryStore implements AutoCloseable {
       try {
         connection.close();
       } finally {
-        permits.release();
+        owner.readers.release();
+        long elapsed = System.nanoTime() - started;
+        owner.readCount.incrementAndGet();
+        owner.readNanos.addAndGet(elapsed);
+        owner.readMaxNanos.accumulateAndGet(elapsed, Math::max);
       }
     }
   }
 
   private ReadLease reader() throws SQLException {
+    long started = System.nanoTime();
     try {
-      if (!readers.tryAcquire(50, TimeUnit.MILLISECONDS))
+      if (!readers.tryAcquire(50, TimeUnit.MILLISECONDS)) {
+        readBusy.incrementAndGet();
         throw new SQLException("History reader busy");
+      }
     } catch (InterruptedException e) {
+      readCancelled.incrementAndGet();
       Thread.currentThread().interrupt();
       throw new SQLException("Query cancelled", e);
     }
@@ -1605,8 +1699,9 @@ public final class HistoryStore implements AutoCloseable {
       execute(c, "PRAGMA query_only=ON");
       execute(c, "PRAGMA busy_timeout=1000");
       execute(c, "PRAGMA cache_size=-4096");
-      return new ReadLease(c, watchdog.watch(c, 3000, null), readers);
+      return new ReadLease(c, watchdog.watch(c, 3000, null), this, started);
     } catch (SQLException | RuntimeException e) {
+      recordReadFailure(e);
       if (c != null)
         try {
           c.close();
@@ -1615,6 +1710,16 @@ public final class HistoryStore implements AutoCloseable {
         }
       readers.release();
       throw e;
+    }
+  }
+
+  private void recordReadFailure(Exception failure) {
+    if (failure instanceof SQLException sql) {
+      readFailures.incrementAndGet();
+      if (sql instanceof SQLTimeoutException
+          || "57014".equals(sql.getSQLState())
+          || sql.getErrorCode() == 9
+          || Thread.currentThread().isInterrupted()) readCancelled.incrementAndGet();
     }
   }
 
@@ -1655,7 +1760,7 @@ public final class HistoryStore implements AutoCloseable {
     watchdog.close();
     if (writer == null) return;
     try {
-      execute(writer, "PRAGMA wal_checkpoint(TRUNCATE)");
+      checkpoint("TRUNCATE");
     } finally {
       writer.close();
     }

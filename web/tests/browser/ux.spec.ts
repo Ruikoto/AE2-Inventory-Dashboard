@@ -240,6 +240,152 @@ test("chart keeps dual axes, zoom and legend while theme and smoothing change", 
   expect((await chartState()).selected["甲物品 0 · 速率"]).toBe(false);
 });
 
+test("curve smoothing changes every line without changing data, gaps or chart interaction", async ({
+  page,
+}) => {
+  const calls = await dashboardFixture(page.context(), {
+    points: 6,
+    segmentedHistory: true,
+  });
+  await ready(page);
+  const smoothing = page.getByLabel("曲线平滑", { exact: true });
+  await expect(smoothing).toBeChecked();
+  await page.getByLabel("波动范围", { exact: true }).check();
+  const chartState = () =>
+    page.evaluate(async () => {
+      const modulePath = "/node_modules/.vite/deps/echarts_core.js";
+      const echarts = await import(modulePath);
+      const chart = echarts.getInstanceByDom(
+        document.querySelector(".trend-chart"),
+      );
+      const option = chart.getOption();
+      return {
+        series: option.series.map(
+          (series: {
+            id: string;
+            data: unknown[];
+            smooth: boolean;
+            smoothMonotone: string;
+            connectNulls: boolean;
+          }) => ({
+            id: series.id,
+            data: series.data,
+            smooth: series.smooth,
+            smoothMonotone: series.smoothMonotone,
+            connectNulls: series.connectNulls,
+          }),
+        ),
+        zoom: option.dataZoom[0].start,
+        selected: option.legend[0].selected,
+        tooltip: option.tooltip[0].formatter([
+          { data: option.series[0].data[0] },
+        ]),
+      };
+    });
+  await expect.poll(async () => (await chartState()).series.length).toBe(4);
+  const before = await chartState();
+  expect(
+    before.series.every(
+      (series: {
+        smooth: boolean;
+        smoothMonotone: string;
+        connectNulls: boolean;
+      }) =>
+        series.smooth && series.smoothMonotone === "x" && !series.connectNulls,
+    ),
+  ).toBe(true);
+  const data = before.series.map(
+    (series: { data: { value: [number, number | null] }[] }) => series.data,
+  );
+  expect(
+    data[0].filter(
+      (point: { value: [number, number | null] }) => point.value[1] === null,
+    ),
+  ).toHaveLength(1);
+  expect(
+    data[1].filter(
+      (point: { value: [number, number | null] }) => point.value[1] === null,
+    ),
+  ).toHaveLength(2);
+  expect(before.tooltip).toContain("平均速率 300 个/min");
+  await page.locator("canvas").evaluate((el) => {
+    (el as HTMLElement).dataset.testIdentity = "smooth-preserved";
+  });
+  await page.evaluate(async () => {
+    const modulePath = "/node_modules/.vite/deps/echarts_core.js";
+    const echarts = await import(modulePath);
+    const chart = echarts.getInstanceByDom(
+      document.querySelector(".trend-chart"),
+    );
+    chart.dispatchAction({ type: "dataZoom", start: 20, end: 80 });
+    chart.dispatchAction({ type: "legendUnSelect", name: "甲物品 0 · 速率" });
+  });
+  const requestsBefore = calls.history;
+  await smoothing.uncheck();
+  await expect
+    .poll(async () =>
+      (await chartState()).series.every(
+        (series: { smooth: boolean }) => !series.smooth,
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ world, network }) =>
+          JSON.parse(
+            localStorage.getItem(
+              `ae2dash:1:${location.origin}:/:${world}:${network}`,
+            ) ?? "{}",
+          ).smoothCurves,
+        { world, network: networks[0] },
+      ),
+    )
+    .toBe(false);
+  const after = await chartState();
+  expect(
+    after.series.map((series: { data: unknown[] }) => series.data),
+  ).toEqual(data);
+  expect(after.tooltip).toBe(before.tooltip);
+  expect(after.zoom).toBe(20);
+  expect(after.selected["甲物品 0 · 速率"]).toBe(false);
+  expect(calls.history).toBe(requestsBefore);
+  await expect(page.locator("canvas")).toHaveAttribute(
+    "data-test-identity",
+    "smooth-preserved",
+  );
+  await smoothing.check();
+  await expect
+    .poll(async () =>
+      (await chartState()).series.every(
+        (series: { smooth: boolean }) => series.smooth,
+      ),
+    )
+    .toBe(true);
+});
+
+test("curve smoothing is saved immediately on network changes and restored after reload", async ({
+  page,
+}) => {
+  await dashboardFixture(page.context());
+  await ready(page);
+  const smoothing = page.getByLabel("曲线平滑", { exact: true });
+  await smoothing.uncheck();
+  await page.getByLabel("网络", { exact: true }).selectOption(networks[1]);
+  await expect(page.locator(".inventory-row").first()).toContainText(
+    "乙物品 0",
+  );
+  await expect(smoothing).toBeChecked();
+  await page.getByLabel("网络", { exact: true }).selectOption(networks[0]);
+  await expect(page.locator(".inventory-row").first()).toContainText(
+    "甲物品 0",
+  );
+  await expect(smoothing).not.toBeChecked();
+  await page.reload();
+  await expect(smoothing).not.toBeChecked();
+  await expect(page.locator("canvas")).toHaveCount(1);
+});
+
 test("single comparison expands variants for the displayed group", async ({
   page,
 }) => {
@@ -341,6 +487,7 @@ test("failed local storage preserves network preferences within the session", as
     };
   });
   await ready(page);
+  await page.getByLabel("曲线平滑", { exact: true }).uncheck();
   await page
     .getByRole("button", { name: "收藏 甲物品 0", exact: true })
     .click();
@@ -352,6 +499,7 @@ test("failed local storage preserves network preferences within the session", as
   await expect(
     page.getByRole("button", { name: "取消收藏 甲物品 0", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("曲线平滑", { exact: true })).not.toBeChecked();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await expect(
     page.getByText("浏览器无法保存设置，本次会话仍可使用"),
@@ -423,6 +571,20 @@ for (const width of [1440, 1024, 390]) {
           fullPage: true,
         });
       }
+      for (const label of ["曲线平滑", "波动范围"]) {
+        const control = page.getByLabel(label, { exact: true });
+        await expect(control).toBeVisible();
+        const bounds = (await control.locator("..").boundingBox())!;
+        expect(bounds.x).toBeGreaterThanOrEqual(0);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+      }
+      const title = (await page.locator(".detail-title").boundingBox())!;
+      const options = (await page.locator(".chart-options").boundingBox())!;
+      expect(title.x + title.width).toBeLessThanOrEqual(options.x);
+      await page.getByLabel("曲线平滑", { exact: true }).uncheck();
+      await expect(
+        page.getByLabel("曲线平滑", { exact: true }),
+      ).not.toBeChecked();
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth,

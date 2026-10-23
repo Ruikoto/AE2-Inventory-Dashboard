@@ -21,3 +21,5 @@ ae2-dashboard-assets/
 resource-keys.json
 local.properties
 .env*
+tools/backup/__pycache__/
+server/logs/

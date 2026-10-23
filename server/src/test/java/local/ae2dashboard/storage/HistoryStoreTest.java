@@ -33,6 +33,210 @@ class HistoryStoreTest {
   }
 
   @Test
+  void historyUsesBoundedLookbackWithoutExpandingTheVisibleRange() throws Exception {
+    long t = 10 * History.DAY;
+    try (var store = open()) {
+      for (int i = 0; i <= 90; i++)
+        store.append(sample(t + i * 10000, "s", "" + (i * 10 + (i == 90 ? 100 : 0))));
+      long[] windows = {60000, 300000, 900000};
+      String[] rates = {"160", "80", "66.666667"};
+      for (int i = 0; i < windows.length; i++) {
+        var result =
+            store.history(
+                "network", List.of("item1"), t + 890000, t + 900000, 10000, t + 900000, windows[i]);
+        var narrow = result.series().get(0);
+        var wide =
+            store
+                .history("network", List.of("item1"), t, t + 900000, 10000, t + 900000, windows[i])
+                .series()
+                .get(0);
+        var stats =
+            store
+                .statistics("network", false, t + 890000, t + 900000, 0, 10, t + 900000)
+                .rows()
+                .get(0);
+        assertEquals(t + 890000, result.availableFrom());
+        assertFalse(result.truncated());
+        assertEquals(2, narrow.points().size());
+        assertEquals("60", narrow.points().get(0).smoothedRate());
+        assertEquals(rates[i], narrow.points().get(1).smoothedRate());
+        assertEquals(wide.points().get(90).smoothedRate(), narrow.points().get(1).smoothedRate());
+        assertNull(narrow.points().get(0).rate());
+        assertEquals("110", narrow.delta());
+        assertEquals("660", narrow.rate());
+        assertEquals(2, narrow.statisticsSamples());
+        assertEquals(stats.delta(), narrow.delta());
+        assertEquals(stats.rate(), narrow.rate());
+        assertEquals(stats.statisticsFrom(), narrow.statisticsFrom());
+        assertEquals(stats.statisticsScope(), narrow.statisticsScope());
+      }
+      var linear =
+          store
+              .history("network", List.of("item1"), t + 830000, t + 890000, 10000, t + 900000)
+              .series()
+              .get(0);
+      assertEquals("60", linear.points().get(0).smoothedRate());
+      assertEquals("60", linear.delta());
+      assertEquals("60", linear.rate());
+      assertEquals(7, linear.statisticsSamples());
+      var single =
+          store
+              .history("network", List.of("item1"), t + 900000, t + 910000, 10000, t + 910000)
+              .series()
+              .get(0);
+      assertEquals("80", single.points().get(0).smoothedRate());
+      assertNull(single.points().get(0).rate());
+      assertNull(single.delta());
+      assertNull(single.rate());
+      assertEquals(1, single.statisticsSamples());
+      assertEquals("insufficient", single.statisticsScope());
+    }
+  }
+
+  @Test
+  void coarseCoverageOrdersSegmentsByObservationTime() throws Exception {
+    long t = 10 * History.DAY;
+    try (var store = open()) {
+      for (long tier : new long[] {60000, 900000}) {
+        long start = t + (tier == 60000 ? 0 : 900000);
+        long now = start + (tier == 60000 ? 2 : 8) * History.DAY;
+        store.append(sample(start, "z", "9000"));
+        store.append(sample(start + 10000, "z", "9010"));
+        store.append(sample(start + 20000, "a", "20"));
+        var first =
+            store
+                .history("network", List.of("item1"), start, start + 20000, tier, now)
+                .series()
+                .get(0);
+        assertEquals(start + 20000, first.statisticsFrom());
+        assertNull(first.delta());
+        assertNull(first.points().get(1).smoothedRate());
+        for (long offset = 30000; offset <= tier + 20000; offset += 10000)
+          store.append(sample(start + offset, "a", "" + offset / 1000));
+        for (long end : new long[] {start + tier - 10000, start + tier + 20000}) {
+          var history =
+              store.history("network", List.of("item1"), start, end, tier, now).series().get(0);
+          var stats = store.statistics("network", false, start, end, 0, 10, now).rows().get(0);
+          assertEquals(start + 20000, history.statisticsFrom());
+          assertEquals(end, history.statisticsTo());
+          assertEquals((end - start - 20000) / 10000 + 1, history.statisticsSamples());
+          assertEquals("" + (end - start - 20000) / 1000, history.delta());
+          assertEquals("60", history.rate());
+          assertEquals(stats.statisticsFrom(), history.statisticsFrom());
+          assertEquals(stats.statisticsTo(), history.statisticsTo());
+          assertEquals(stats.statisticsSamples(), history.statisticsSamples());
+          assertEquals(stats.delta(), history.delta());
+          assertEquals(stats.rate(), history.rate());
+          assertEquals("latest-continuous", history.statisticsScope());
+        }
+      }
+    }
+  }
+
+  @Test
+  void lookbackKeepsTheRequestedTierAtAgeAndRetentionBoundaries() throws Exception {
+    long t = 10 * History.DAY;
+    try (var store = open()) {
+      for (int i = -90; i <= 11; i++)
+        store.append(sample(t + i * 10000, "s", "" + (1000 + i * 10)));
+      for (long age : new long[] {History.DAY, 7 * History.DAY}) {
+        long step = age == History.DAY ? 10000 : 60000;
+        var result =
+            store.history("network", List.of("item1"), t, t + 110000, step, t + age, 900000);
+        assertEquals(step, result.step());
+        assertEquals(t, result.availableFrom());
+        assertFalse(result.truncated());
+        assertEquals("60", result.series().get(0).points().get(0).smoothedRate());
+        assertEquals(12, result.series().get(0).statisticsSamples());
+      }
+      store.maintain(t + History.DAY);
+      var retained =
+          store
+              .history("network", List.of("item1"), t, t + 110000, 10000, t + History.DAY)
+              .series()
+              .get(0);
+      assertNull(retained.points().get(0).smoothedRate());
+      assertEquals("60", retained.points().get(1).smoothedRate());
+      assertEquals("1000", retained.points().get(0).quantity());
+      assertEquals(12, retained.statisticsSamples());
+      assertEquals("110", retained.delta());
+    }
+  }
+
+  @Test
+  void lookbackUsesRealZeroObservationsAndNeverBridgesRestartOrGap() throws Exception {
+    long t = 10 * History.DAY;
+    try (var store = open()) {
+      for (int i = 0; i <= 6; i++)
+        store.append(sample(t + i * 10000, "s", i < 5 ? null : "" + (50 + i * 10)));
+      var added =
+          store
+              .history("network", List.of("item1"), t + 50000, t + 60000, 10000, t + 60000, 60000)
+              .series()
+              .get(0);
+      assertEquals("120", added.points().get(0).smoothedRate());
+      assertEquals("110", added.points().get(1).smoothedRate());
+      assertEquals("10", added.delta());
+      store.append(sample(t + 100000, "s", "5000"));
+      var gap =
+          store
+              .history("network", List.of("item1"), t + 100000, t + 110000, 10000, t + 110000)
+              .series()
+              .get(0);
+      assertNull(gap.points().get(0).smoothedRate());
+      assertNull(gap.delta());
+    }
+    try (var store = open()) {
+      store.append(sample(t + 110000, "s", "6000"));
+      var restart =
+          store
+              .history("network", List.of("item1"), t + 110000, t + 120000, 10000, t + 120000)
+              .series()
+              .get(0);
+      assertNull(restart.points().get(0).smoothedRate());
+      assertNull(restart.delta());
+    }
+  }
+
+  @Test
+  void multipleNetworksStayContinuousAcrossMaintenanceAndRetention() throws Exception {
+    long t = 10 * History.DAY, end = t + 420000;
+    try (var store = open()) {
+      for (int network = 0; network < 4; network++)
+        store.saveNetwork(
+            new Network("n" + network, t, t, "online", Set.of("a" + network)), null, Set.of());
+      for (int i = 0; i <= 42; i++) {
+        long at = t + i * 10000;
+        for (int network = 0; network < 4; network++)
+          store.append(
+              Snapshot.of(
+                  "n" + network,
+                  "s",
+                  at,
+                  at,
+                  List.of(
+                      new Resource.Stored(resource, BigInteger.valueOf(network * 1000 + i * 10)))));
+      }
+      for (long age : new long[] {0, History.DAY}) {
+        if (age != 0) store.maintain(end + age);
+        for (int network = 0; network < 4; network++) {
+          var history =
+              store.history("n" + network, List.of("item1"), t, end, 0, end + age).series().get(0);
+          var stats =
+              store.statistics("n" + network, false, t, end, 0, 10, end + age).rows().get(0);
+          assertEquals(1, history.points().stream().map(History.Point::segment).distinct().count());
+          assertEquals(43, history.statisticsSamples());
+          assertEquals("420", history.delta());
+          assertEquals("60", history.rate());
+          assertEquals(stats.delta(), history.delta());
+          assertEquals(stats.statisticsSamples(), history.statisticsSamples());
+          assertTrue(history.complete());
+        }
+      }
+    }
+  }
+
+  @Test
   void quarterRetainsLeadingFlatMinutesForRisingAndFallingInventory() throws Exception {
     long t = 10 * History.DAY;
     try (var store = open()) {

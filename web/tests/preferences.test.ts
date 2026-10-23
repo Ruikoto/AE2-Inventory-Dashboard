@@ -6,6 +6,22 @@ import {
 } from "../src/models/preferences";
 import { decimalOrder } from "../src/models/format";
 afterEach(() => vi.unstubAllGlobals());
+it("defaults curve smoothing on and preserves only explicit boolean preferences", () => {
+  expect(defaults().smoothCurves).toBe(true);
+  expect(loadPreferences("key", '{"inventoryView":"list"}').smoothCurves).toBe(
+    true,
+  );
+  expect(loadPreferences("key", '{"smoothCurves":false}').smoothCurves).toBe(
+    false,
+  );
+  expect(loadPreferences("key", '{"smoothCurves":true}').smoothCurves).toBe(
+    true,
+  );
+  expect(loadPreferences("key", '{"smoothCurves":"false"}').smoothCurves).toBe(
+    true,
+  );
+  expect(loadPreferences("key", "{broken").smoothCurves).toBe(true);
+});
 it("defaults to grid and restores only valid infinity and view preferences", () => {
   expect(defaults().inventoryView).toBe("grid");
   expect(defaults().excludeInfinite).toBe(false);

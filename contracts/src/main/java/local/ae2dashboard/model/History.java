@@ -115,27 +115,9 @@ public final class History {
       long tier,
       long requestedWindow) {
     if (source.isEmpty()) return new Series(id, List.of(), null, null, false);
-    Point first = source.get(source.size() - 1), end = first;
+    Point first = null, end = null;
     long count = 0;
-    for (int i = source.size() - 1; i >= 0; i--) {
-      Point p = source.get(i);
-      if (!p.segment().equals(end.segment())) break;
-      first = p;
-      count += p.samples();
-    }
-    boolean complete =
-        first == source.get(0)
-            && count > 1
-            && first.firstAt() <= from + Math.max(tier, 10_000)
-            && end.lastAt() >= to - Math.max(tier, 30_000);
-    String delta =
-        count > 1 && end.lastAt() > first.firstAt()
-            ? new BigInteger(end.quantity())
-                .subtract(new BigInteger(first.firstQuantity()))
-                .toString()
-            : null;
-    String average =
-        delta == null ? null : rate(new BigInteger(delta), end.lastAt() - first.firstAt());
+    boolean oneSegment = true;
     long window = Math.max(tier, requestedWindow);
     List<Point> display = new ArrayList<>();
     int left = 0;
@@ -151,6 +133,16 @@ public final class History {
                   new BigInteger(p.quantity()).subtract(new BigInteger(a.firstQuantity())),
                   p.lastAt() - a.firstAt())
               : null;
+      previous = p;
+      // 范围前的真实观测只参与平滑，不进入显示桶、极值或区间统计。
+      if (p.firstAt() < from || p.lastAt() > to) continue;
+      if (end == null || !end.segment().equals(p.segment())) {
+        if (end != null) oneSegment = false;
+        first = p;
+        count = 0;
+      }
+      end = p;
+      count += p.samples();
       Point next =
           new Point(
               p.timestamp() / step * step,
@@ -186,8 +178,21 @@ public final class History {
         }
       }
       display.add(next);
-      previous = p;
     }
+    if (display.isEmpty()) return new Series(id, List.of(), null, null, false);
+    boolean complete =
+        oneSegment
+            && count > 1
+            && first.firstAt() <= from + Math.max(tier, 10_000)
+            && end.lastAt() >= to - Math.max(tier, 30_000);
+    String delta =
+        count > 1 && end.lastAt() > first.firstAt()
+            ? new BigInteger(end.quantity())
+                .subtract(new BigInteger(first.firstQuantity()))
+                .toString()
+            : null;
+    String average =
+        delta == null ? null : rate(new BigInteger(delta), end.lastAt() - first.firstAt());
     if (display.size() > 1200)
       throw new IllegalArgumentException("Too many continuous segments; narrow the history range");
     previous = null;

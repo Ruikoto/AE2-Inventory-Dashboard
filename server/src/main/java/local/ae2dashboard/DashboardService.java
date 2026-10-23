@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 /** Native-free service boundary, also used by the local integration harness. */
 public final class DashboardService implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger("ae2dashboard");
+  private static final long MAX_PENDING_SAMPLE_BYTES = 64L * 1024 * 1024;
   private final HistoryStore store;
   private final AssetPack assets;
   private final Presentation presentation;
@@ -32,14 +33,20 @@ public final class DashboardService implements AutoCloseable {
           }) {
         @Override
         protected void terminated() {
+          // ThreadPoolExecutor 停止空闲线程时会设置中断；最终 checkpoint 不再属于可取消任务。
+          boolean interrupted = Thread.interrupted();
           try {
             store.close();
+            LOG.debug("History writer stopped and checkpoint completed");
           } catch (Exception e) {
             LOG.error("History shutdown failed", e);
+          } finally {
+            if (interrupted) Thread.currentThread().interrupt();
           }
         }
       };
-  private final Semaphore pendingSamples = new Semaphore(2);
+  private final AtomicLong pendingSampleBytes = new AtomicLong();
+  private final AtomicLong nextDropWarning = new AtomicLong();
   private final ConcurrentHashMap<String, Network> networks = new ConcurrentHashMap<>();
 
   public record Current(Snapshot snapshot, Snapshot before) {}
@@ -91,6 +98,10 @@ public final class DashboardService implements AutoCloseable {
             }
           }
         });
+    LOG.debug(
+        "History writer started: queueCapacity=32 sampleBudgetBytes={} restoredNetworks={}",
+        MAX_PENDING_SAMPLE_BYTES,
+        networks.size());
   }
 
   public HistoryStore store() {
@@ -195,12 +206,20 @@ public final class DashboardService implements AutoCloseable {
   }
 
   public boolean needsSegment(String id) {
-    return broken.remove(id);
+    boolean needed = broken.remove(id);
+    if (needed) LOG.debug("History sampling starts a new segment after a gap: network={}", id);
+    return needed;
   }
 
   public void network(Network network, String event, Set<String> related) {
     networks.put(network.id(), network);
     if (!"online".equals(network.status())) broken.add(network.id());
+    LOG.debug(
+        "Network observation changed: network={} state={} event={} relatedNetworks={}",
+        network.id(),
+        network.status(),
+        event,
+        related.size());
     submit(
         () -> {
           try {
@@ -254,36 +273,110 @@ public final class DashboardService implements AutoCloseable {
     if (n != null)
       networks.put(
           n.id(), new Network(n.id(), n.createdAt(), snapshot.timestamp(), "online", n.anchors()));
-    if (closing || !pendingSamples.tryAcquire()) {
-      drop(snapshot.networkId());
+    if (closing) {
+      drop(snapshot.networkId(), "closing");
       return;
     }
+    long bytes = snapshot.estimatedBytes();
+    long pending = pendingSampleBytes.get();
+    while (true) {
+      if (bytes > MAX_PENDING_SAMPLE_BYTES - pending) {
+        drop(snapshot.networkId(), "sample-budget");
+        return;
+      }
+      if (pendingSampleBytes.compareAndSet(pending, pending + bytes)) break;
+      pending = pendingSampleBytes.get();
+    }
+    var task = new PendingSample(snapshot, observed, System.nanoTime());
     try {
-      writer.execute(
-          () -> {
-            try {
-              if (observed != null) store.saveNetwork(observed, null, Set.of());
-              store.append(snapshot);
-              crafting.storageRecovered();
-              writeStatus = store.status();
-            } catch (Exception e) {
-              broken.add(snapshot.networkId());
-              writeStatus = store.status().startsWith("paused") ? store.status() : "paused:write";
-              LOG.error("History sample could not be confirmed; recording will retry", e);
-            } finally {
-              pendingSamples.release();
-            }
-          });
+      writer.execute(task);
     } catch (RejectedExecutionException e) {
-      pendingSamples.release();
-      drop(snapshot.networkId());
+      task.discard("writer-queue");
     }
   }
 
-  private void drop(String id) {
-    dropped.incrementAndGet();
+  private final class PendingSample implements Runnable {
+    private final Snapshot snapshot;
+    private final Network observed;
+    private final long queuedAt;
+
+    private PendingSample(Snapshot snapshot, Network observed, long queuedAt) {
+      this.snapshot = snapshot;
+      this.observed = observed;
+      this.queuedAt = queuedAt;
+    }
+
+    @Override
+    public void run() {
+      long started = System.nanoTime();
+      boolean confirmed = false;
+      try {
+        if (observed != null) store.saveNetwork(observed, null, Set.of());
+        store.append(snapshot);
+        crafting.storageRecovered();
+        if (!writeStatus.equals(store.status()))
+          LOG.debug(
+              "History write status changed after sample: network={} from={} to={}",
+              snapshot.networkId(),
+              writeStatus,
+              store.status());
+        writeStatus = store.status();
+        confirmed = true;
+      } catch (Exception e) {
+        broken.add(snapshot.networkId());
+        writeStatus = store.status().startsWith("paused") ? store.status() : "paused:write";
+        LOG.error(
+            "History sample could not be confirmed; recording will retry: network={} timestamp={}",
+            snapshot.networkId(),
+            snapshot.timestamp(),
+            e);
+      } finally {
+        long pending = pendingSampleBytes.addAndGet(-snapshot.estimatedBytes());
+        LOG.debug(
+            "History sample finished: network={} timestamp={} confirmed={} queueMs={} writeMs={}"
+                + " sampleBytes={} pendingBytes={} queueDepth={}",
+            snapshot.networkId(),
+            snapshot.timestamp(),
+            confirmed,
+            TimeUnit.NANOSECONDS.toMillis(started - queuedAt),
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+            snapshot.estimatedBytes(),
+            pending,
+            writer.getQueue().size());
+      }
+    }
+
+    private void discard(String reason) {
+      // execute 拒绝或 shutdownNow 排出时任务不会再运行，由此路径释放一次预算。
+      pendingSampleBytes.addAndGet(-snapshot.estimatedBytes());
+      drop(snapshot.networkId(), reason);
+    }
+  }
+
+  private void drop(String id, String reason) {
+    long total = dropped.incrementAndGet();
     broken.add(id);
     writeStatus = "paused:queue";
+    LOG.debug(
+        "History sample dropped: network={} reason={} pendingBytes={} queueDepth={}"
+            + " droppedTotal={}",
+        id,
+        reason,
+        pendingSampleBytes.get(),
+        writer.getQueue().size(),
+        total);
+    long now = System.currentTimeMillis();
+    long nextWarning = nextDropWarning.get();
+    if (now >= nextWarning && nextDropWarning.compareAndSet(nextWarning, now + 60_000))
+      LOG.warn(
+          "History sample dropped; network starts a new segment: network={} reason={}"
+              + " pendingBytes={} queueDepth={} droppedTotal={} (warning limited to once per"
+              + " minute)",
+          id,
+          reason,
+          pendingSampleBytes.get(),
+          writer.getQueue().size(),
+          total);
   }
 
   private void submit(Runnable task, String id) {
@@ -291,7 +384,7 @@ public final class DashboardService implements AutoCloseable {
     try {
       writer.execute(task);
     } catch (RejectedExecutionException e) {
-      drop(id);
+      drop(id, "metadata-queue");
     }
   }
 
@@ -318,6 +411,10 @@ public final class DashboardService implements AutoCloseable {
   public void close() {
     crafting.close();
     closing = true;
+    LOG.debug(
+        "History writer shutdown requested: pendingBytes={} queueDepth={}",
+        pendingSampleBytes.get(),
+        writer.getQueue().size());
     writer.shutdown();
     List<Runnable> discarded = List.of();
     try {
@@ -327,10 +424,14 @@ public final class DashboardService implements AutoCloseable {
       Thread.currentThread().interrupt();
     }
     // 超时或中断时，排队中的订单写入也必须触发失败回调。
-    for (Runnable task : discarded)
+    for (Runnable task : discarded) {
       if (task instanceof PendingWrite<?> pending)
         pending
             .result()
             .completeExceptionally(new RejectedExecutionException("Shutdown before write"));
+      else if (task instanceof PendingSample sample) sample.discard("shutdown");
+    }
+    if (!discarded.isEmpty())
+      LOG.debug("History shutdown discarded queued tasks: count={}", discarded.size());
   }
 }

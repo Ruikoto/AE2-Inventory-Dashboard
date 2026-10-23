@@ -26,6 +26,7 @@ const props = defineProps<{
   mode: "quantity" | "rate" | "both";
   envelope: boolean;
   buckets: boolean;
+  smoothCurves: boolean;
 }>();
 const host = ref<HTMLElement>();
 let chart: echarts.ECharts | undefined,
@@ -139,6 +140,8 @@ function render() {
         showSymbol: s.points.length === 1,
         symbolSize: 5,
         connectNulls: false,
+        smooth: props.smoothCurves,
+        smoothMonotone: "x",
         animation: false,
         lineStyle: {
           width: metric === "quantity" ? 2 : 1.6,
@@ -157,6 +160,8 @@ function render() {
           data: data(field),
           showSymbol: false,
           connectNulls: false,
+          smooth: props.smoothCurves,
+          smoothMonotone: "x",
           animation: false,
           silent: true,
           lineStyle: { opacity: 0 },
@@ -274,7 +279,14 @@ function schedule() {
   frame = requestAnimationFrame(render);
 }
 watch(
-  () => [props.history, props.rows, props.mode, props.envelope, props.buckets],
+  () => [
+    props.history,
+    props.rows,
+    props.mode,
+    props.envelope,
+    props.buckets,
+    props.smoothCurves,
+  ],
   schedule,
 );
 onMounted(() => {

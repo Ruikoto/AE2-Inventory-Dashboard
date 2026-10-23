@@ -460,10 +460,21 @@ label {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
+.detail-title {
+  min-width: 0;
+}
+.chart-options {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  align-self: flex-start;
+  gap: 12px;
+}
 .detail-heading p {
   font-size: 11px;
   color: var(--muted);
   margin-top: 7px;
+  overflow-wrap: anywhere;
 }
 .resource-stats {
   display: grid;
@@ -759,6 +770,11 @@ footer span:first-child {
   }
   .trend-chart {
     height: 310px;
+  }
+  .chart-options {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
   }
   .resource-stats {
     margin-top: 24px;

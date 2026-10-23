@@ -65,7 +65,11 @@ public final class AeSampler {
         service.network(b.network, state, Set.of());
       }
       if (now < b.next || !state.equals("online")) continue;
-      b.next = now + interval;
+      long lag = now - b.next;
+      b.next = nextSampleAt(b.next, now, interval);
+      long started = System.nanoTime();
+      long sampledBytes = 0;
+      boolean sampled = false;
       try {
         if (service.needsSegment(b.network.id())) b.segment = UUID.randomUUID().toString();
         List<Resource.Stored> exact = new ArrayList<>();
@@ -94,8 +98,11 @@ public final class AeSampler {
                   crafting.isCraftable(key) || crafting.canEmitFor(key),
                   infinite.contains(key)));
         }
-        service.sample(Snapshot.of(b.network.id(), b.segment, now, ++version, exact));
+        Snapshot snapshot = Snapshot.of(b.network.id(), b.segment, now, ++version, exact);
+        sampledBytes = snapshot.estimatedBytes();
+        service.sample(snapshot);
         b.failed = false;
+        sampled = true;
       } catch (RuntimeException e) {
         b.failed = true;
         b.segment = UUID.randomUUID().toString();
@@ -105,8 +112,25 @@ public final class AeSampler {
             "error",
             Set.of());
         LOG.error("AE inventory sampling failed; no partial sample was published", e);
+      } finally {
+        LOG.debug(
+            "AE sampling finished: network={} timestamp={} published={} lagMs={} skippedSlots={}"
+                + " durationMs={} sampleBytes={} nextAt={}",
+            b.network.id(),
+            now,
+            sampled,
+            lag,
+            lag / interval,
+            (System.nanoTime() - started) / 1_000_000,
+            sampledBytes,
+            b.next);
       }
     }
+  }
+
+  /** 已到期时跳过错过的槽位，保留各网络原有相位；每个 tick 仍只采一次。 */
+  static long nextSampleAt(long next, long now, long interval) {
+    return next + ((now - next) / interval + 1) * interval;
   }
 
   private void discover(long now) {

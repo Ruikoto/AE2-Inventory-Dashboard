@@ -18,6 +18,7 @@ export interface Preferences {
   mode: "quantity" | "rate" | "both";
   rateWindow: number;
   envelope: boolean;
+  smoothCurves: boolean;
 }
 export const defaults = (): Preferences => ({
   favorites: [],
@@ -39,6 +40,7 @@ export const defaults = (): Preferences => ({
   mode: "both",
   rateWindow: 300000,
   envelope: false,
+  smoothCurves: true,
 });
 export function preferenceKey(world: string, network: string): string {
   return `ae2dash:1:${location.origin}:${new URL("./", document.baseURI).pathname}:${world}:${network}`;
@@ -60,6 +62,7 @@ export function loadPreferences(
       "zeros",
       "buckets",
       "envelope",
+      "smoothCurves",
     ] as const)
       if (typeof input[field] === "boolean") output[field] = input[field];
     if (["quantity", "name", "delta", "rate"].includes(input.sort))

@@ -425,7 +425,7 @@ const chartGroups = computed(() =>
           ‹ 返回库存</button
         ><template v-if="chosen"
           ><div class="detail-heading">
-            <div>
+            <div class="detail-title">
               <h1>
                 {{
                   selectedRows.length > 1
@@ -441,21 +441,31 @@ const chartGroups = computed(() =>
                 }}
               </p>
             </div>
-            <label
-              class="check"
-              :title="
-                mode === 'rate'
-                  ? '波动范围仅适用于数量'
-                  : !hasEnvelope
-                    ? '当前粒度下无额外波动范围'
-                    : '显示每个统计桶内的最低与最高库存'
-              "
-              ><input
-                v-model="envelope"
-                type="checkbox"
-                :disabled="mode === 'rate' || !hasEnvelope"
-              />波动范围</label
-            >
+            <div class="chart-options">
+              <label
+                class="check"
+                title="仅调整曲线显示，不改变采样值或速率计算"
+                ><input
+                  v-model="preferences.smoothCurves"
+                  type="checkbox"
+                />曲线平滑</label
+              >
+              <label
+                class="check"
+                :title="
+                  mode === 'rate'
+                    ? '波动范围仅适用于数量'
+                    : !hasEnvelope
+                      ? '当前粒度下无额外波动范围'
+                      : '显示每个统计桶内的最低与最高库存'
+                "
+                ><input
+                  v-model="envelope"
+                  type="checkbox"
+                  :disabled="mode === 'rate' || !hasEnvelope"
+                />波动范围</label
+              >
+            </div>
           </div>
           <div v-if="selectedRows.length === 1" class="resource-stats">
             <div>
@@ -501,6 +511,7 @@ const chartGroups = computed(() =>
               :buckets="preferences.buckets"
               :mode="mode"
               :envelope="envelope"
+              :smooth-curves="preferences.smoothCurves"
           /></template>
           <div v-else class="empty chart-empty">
             <strong>等待历史样本</strong>

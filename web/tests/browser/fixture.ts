@@ -12,6 +12,7 @@ export async function dashboardFixture(
   options: {
     count?: number;
     points?: number;
+    segmentedHistory?: boolean;
     inventoryDelay?: number;
     statisticsDelay?: number;
     singleNetwork?: boolean;
@@ -172,9 +173,13 @@ export async function dashboardFixture(
             rate: "300",
             complete: false,
             statisticsScope: "latest-continuous",
-            statisticsFrom: from + 60000,
+            statisticsFrom: options.segmentedHistory
+              ? from + Math.floor(points / 2) * step
+              : from + 60000,
             statisticsTo: to,
-            statisticsSamples: points,
+            statisticsSamples: options.segmentedHistory
+              ? points - Math.floor(points / 2)
+              : points,
             points: Array.from({ length: points }, (_, i) => ({
               timestamp: from + i * step,
               firstAt: from + i * step,
@@ -184,9 +189,15 @@ export async function dashboardFixture(
               min: String(99900 + i * 300),
               max: String(100300 + i * 300),
               samples: 6,
-              segment: "one",
+              segment:
+                options.segmentedHistory && i >= Math.floor(points / 2)
+                  ? "two"
+                  : "one",
               rate: "-720",
-              smoothedRate: String(300 + Math.round(Math.sin(i / 10) * 20)),
+              smoothedRate:
+                options.segmentedHistory && i === Math.floor(points / 2)
+                  ? null
+                  : String(300 + Math.round(Math.sin(i / 10) * 20)),
               rateWindowMs:
                 Number(url.searchParams.get("rateWindowMs")) || 300000,
             })),

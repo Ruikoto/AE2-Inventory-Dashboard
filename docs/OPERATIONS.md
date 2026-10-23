@@ -4,7 +4,7 @@
 
 ## 服务端
 
-需要 Forge 47.4.16、AE2 15.4.10、Java 17。仅安装 server 发行 JAR；客户端无须安装它。原 AE2 Web Integration 可以保留，本项目使用独立 Mod ID 和默认端口。
+需要 Forge 47.4.16、AE2 15.4.10、Java 17。仅安装 server 发行 JAR；客户端无须安装它。原 AE2 Web Integration 已退役，当前运维和升级只针对本项目。
 
 配置在 config/ae2-dashboard.properties，首次启动写入默认值与随机主密码，改动重启生效：
 
@@ -60,10 +60,10 @@ server {
 
 0.1.3-dev 首次打开 schema1 数据库会事务迁移至 schema2，新增能力标记和订单表，保留原统计。旧版本不能读取 schema2；回退旧 JAR 时需同时恢复升级前完整数据库备份，不能把旧 JAR直接指向已升级的数据库。迁移失败不会删除或重建原库。
 
-0.1.4-dev继续使用schema2。品质显示从既有身份派生，不重写身份/历史；CPU材料与预计剩余时间只在内存中保存，不增加逐次数据库写入。
+0.1.4-dev和0.1.5-dev继续使用schema2。品质显示从既有身份派生，不重写身份/历史；CPU材料与预计剩余时间只在内存中保存，不增加逐次数据库写入。
 
 - 正常停服并完成检查点后复制整个 ae2-dashboard 目录。
-- 在线备份可由管理员使用 SQLite backup API 或命令行 `.backup`，不依赖网页接口。
+- 在线备份使用下述进程外 SQLite backup API；必须先确认游戏内文件备份不再打开在线数据库及 WAL/SHM，并在初次排除后重启恢复锁。
 - 配置中的密码文件与数据库备份分别保管。
 - 恢复前停服，先保留当前完整目录，再恢复同一份备份，不混搭不同时间点的主库和 WAL。
 - 坏库和未知更高 schema 不会自动重置。需要保留文件后人工诊断，不能以删除原库作为默认修复。
@@ -74,7 +74,35 @@ WAL/NORMAL 可在进程崩溃后恢复已提交事务；突然断电或 OS 崩�
 
 空间不足、写入或队列故障会造成明确缺口；当前库存继续发布，恢复后使用新连续段。端口被占仅关闭网页入口，采集可以继续。资源包无效只影响显示。
 
-采样与写入都保留完整性边界：网络最多十万精确资源，单快照脱离对象元数据估算最多 32 MiB，历史单事务估算最多 64 MiB 且受预算预留限制；超限整份失败并显示状态，不截断库存。原生单次库存扫描不可强制中断。
+采样与写入都保留完整性边界：网络最多十万精确资源，单快照脱离对象元数据估算最多 32 MiB；活动和排队采样合计估算最多 64 MiB，共享写任务队列上限32；历史单事务估算最多 64 MiB 且受预算预留限制。超限整份失败并显示状态，不截断库存。原生单次库存扫描不可强制中断。长 tick 后跳过过期槽并保留各网络相位，不补跑；下一次采样间隔可能短于完整周期。
+
+## 每小时一致性备份
+
+同 JVM 普通打开并关闭 SQLite 文件会释放该进程持有的 POSIX 文件锁，即使 SQLite 自己的连接仍然开启。文件备份和后来的外部 SQLite 读取组合可缩短仍被 JVM 映射的 SHM，触发 SIGBUS；`mode=ro`、`query_only` 都不能解决这个锁问题。不要把 `mmap_size=0` 当成关闭 WAL SHM，也不要删除 WAL/SHM。
+
+SimpleBackups 1.20.1-3.1.24 的 `ignored_paths` 只检查直接父目录；排除整个目录时同时设置前缀正则，保留其他已配置的排除项：
+
+```toml
+[to_ignore]
+ignored_paths = ["ae2-dashboard", ".ae2-dashboard-backup-staging"]
+ignored_files_regex = '^(?:ae2-dashboard|\.ae2-dashboard-backup-staging)(?:/.*)?$'
+```
+
+完成副本目录 `ae2-dashboard-backup` 不在排除范围。脚本在独立 Linux 进程运行，使用标准库 SQLite backup API，写专用暂存目录、关闭后 quick_check、原子发布 `ae2-dashboard-backup/history.sqlite`。互斥避免重叠，默认240秒超时，预检数据库页大小加64MiB空余；发布前失败返回非零退出码并保留上一份完整副本。如果替换成功后目录同步失败，明确报告“新副本已完整发布”，需检查磁盘持久性，不能误以为旧副本仍在。强制终止可能留下专用暂存文件；核实没有备份在运行后只清理确认的遗留文件，不删除在线数据库。世界 ZIP 可读到发布前或发布后的完整副本，不会读到半成品。
+
+安装步骤（系统服务按本机权限运行；生产 world 路径只写私有 env 文件）：
+
+1. 将 `tools/backup/history_backup.py` 安装到 `/usr/local/lib/ae2-dashboard/history_backup.py`，两个 unit 模板安装到 `/etc/systemd/system/`。
+2. 按 `ae2-dashboard-backup.env.example` 创建权限0600的 `/etc/ae2-dashboard-backup.env`，设置 `DASHBOARD_WORLD`。脚本默认由 systemd 系统服务运行；使用独立游戏账户时设置对应 `User=` 并授予世界目录读写权限。
+3. 修正 SimpleBackups 排除配置，`systemctl daemon-reload`；此时不启动备份，也不启用 timer。
+4. 用户手动重启游戏，确认配置和排除规则生效。`systemctl start ae2-dashboard-backup.service`，检查 `journalctl -u ae2-dashboard-backup.service` 与完成副本；首次成功后 `systemctl enable --now ae2-dashboard-backup.timer`。
+5. 核对下次世界 ZIP 不含在线/暂存目录，包含 `ae2-dashboard-backup/history.sqlite`；从 ZIP 提取到隔离目录，quick_check 通过后确认现有保留/NAS链仍覆盖它。
+
+定时器每小时运行（最多两分钟随机偏移）；世界备份采用最近一次完成副本，时间可能早于世界 ZIP。现有 ZIP 保留与 NAS 快照继续负责多版本保留，脚本本身只维护一个完成副本。恢复时停服保留原目录，从完成副本恢复至在线目录，不能混入旧 WAL/SHM。
+
+## 排障日志
+
+0.1.5 增加 `ae2dashboard` DEBUG 汇总：采样 lag/跳槽/耗时、队列等待/深度/估算字节、写入与维护、检查点和查询耗时及失败类别。Forge 的 `logs/debug.log` 是核查入口；INFO/WARN 继续报告启停及真实故障，丢样 WARN 最多每分钟一次，累计值仍保留。日志不输出库存条目、原始 NBT 或认证信息。日志时间按服务器时区对齐用户报告时间，不能只凭当前状态反推事故原因。
 
 ## 停用和卸载
 

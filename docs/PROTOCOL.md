@@ -17,7 +17,7 @@
 
 库存行包含 id、groupId、type、registryId、name、unit、amountPerUnit、quantity、delta、rate、variantCount、craftable、infinite 和可选 icon。可合成零库存默认进入目录，普通历史零库存受 zeros 控制；合并行的能力标记对精确成员取或。infinite 来自已确认的无限单元，不按数量阈值判断；quantity 始终保留真实数值。分页必须核对同一 version；变化则重新读取。库存端点的旧 delta/rate 字段仍为相邻有效采样，windowMs 表示时间，以兼容既有调用。新版网页不使用它们显示区间指标，而是调用 statistics；该端点与 history 的汇总独立于显示粒度，使用所选范围内最新连续有效段。至少两个不同时间的有效样本才返回 delta/rate，JSON 缺省值等同 null，客户端不能沿用上次值。
 
-历史返回 from/to、step、availableFrom、truncated、series。序列有 id、points、complete、可用的 delta/rate。点包含桶起点 timestamp、segment、实际 firstAt/lastAt、firstQuantity、末值 quantity、min/max、samples、rate。segment 改变必须断线，缺口不计算速率。旧层级边界不完整的桶不能伪造精确观测。新增 smoothedRate 为底层观测计算的滚动平均净速率；rateWindowMs 返回实际窗口下限（不低于存储精度），开始处可以使用尚不足整窗的已有连续观测，绝不跨段。Point.rate 保持相邻显示点的旧语义。
+历史返回 from/to、step、availableFrom、truncated、series。序列有 id、points、complete、可用的 delta/rate。点包含桶起点 timestamp、segment、实际 firstAt/lastAt、firstQuantity、末值 quantity、min/max、samples、rate。segment 改变必须断线，缺口不计算速率。旧层级边界不完整的桶不能伪造精确观测。smoothedRate 为底层观测计算的滚动平均净速率；rateWindowMs 返回实际窗口下限（不低于存储精度）。平滑允许回看请求范围前至多一个窗口内、同一存储层级和连续段的真实观测；范围起点仍决定存储层级和显示粒度，保留期不足时只使用剩余观测，不跨层级补点或插值。新段仅一个样本时速率为空，不用未来观测回填。回看数据不计入显示桶、极值、样本数、区间统计、availableFrom 或 truncated；区间指标始终限定请求范围。Point.rate 保持相邻显示点的旧语义，首个可见点仍为空，即使其 smoothedRate 已有值。
 
 statistics 的行与 history 的序列均包含 statisticsFrom/statisticsTo（真实端点）、statisticsSamples、statisticsScope（full/latest-continuous/insufficient）。complete=false 不再使有效的最近连续段指标消失。latest-continuous 以实际端点间的经过时间作分母，不以整个请求范围作分母。分页 version 是本次服务运行的按网络修订号；采样和历史维护均会更新，不是 Unix 采样时间，客户端只比较相等性。
 
