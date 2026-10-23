@@ -2,12 +2,13 @@
 
 整理于 2026-10-23。这是交付记录，不是自动更新的现场状态。
 
-## 当前开发交付：0.1.5-dev
+## 当前交付：0.1.5-dev已上传，等待用户手动重启
 
 - 用户已批准 [0.1.5实施约定](MONITORING_015_PLAN.md)：修复长tick后的采样同步、两个快照许可丢样、速率冷启动、同桶时间排序及停服checkpoint；增加视觉平滑开关、诊断日志和进程外一致性备份。
 - 已直接在main实施，全量106项Java/native、45项Linux相关回归、21项网页单元、57项浏览器、7项备份测试和原生Forge安装包/真实SimpleBackups恢复验证通过，见 [验证记录](MONITORING_015_VALIDATION.md)。
 - 旧AE2-Web-Integration正式退役。两层项目指令已更新：后续直接main开发，推送origin/main、上传服务端JAR；用户负责手动重启。
-- 当前生产仍运行0.1.4-dev；本轮0.1.5安装交付待记录。备份脚本与timer安装后保持未启用，用户重启确认排除生效并首次备份成功后再启用。API/schema2不变，客户端无需重新导出。
+- 源码提交`aeb37037789e245b8b1e7222f6d887bc5db47010`已推送origin/main。2026-10-23 12:29（UTC+8）已安装0.1.5-dev服务端JAR，SHA-256为`b0f97edaae283370ddb5b3200dc688899ef67a60a368a1205f875fb38a3d9a60`，mods中只有该版本。旧0.1.4 JAR和原SimpleBackups配置位于实例`dashboard-deploy/20261023-0.1.5-dev/backup/`。
+- SimpleBackups已排除整个在线/暂存目录；外部备份脚本、service/timer及私有env已安装，timer为disabled/inactive，首次备份尚未执行。当前游戏进程未重启，仍运行0.1.4-dev；用户重启确认排除生效并首次备份成功后再启用timer。API/schema2不变，客户端无需重新导出。
 
 ## 之前的交付：0.1.4-dev
 

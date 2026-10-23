@@ -47,7 +47,14 @@ Linux A/B复现使用生产同款Forge JDBC3.36.0.3+20211227、native SQLite3.36
 
 ## 交付与剩余边界
 
-版本为0.1.5-dev，API1/schema2不变；客户端无需重新导出。直接main提交并推送origin/main，package.ps1在源码提交后生成安装包清单。安装记录见 [交接状态](HANDOFF.md)。
+版本为0.1.5-dev，API1/schema2不变；客户端无需重新导出。源码`aeb37037789e245b8b1e7222f6d887bc5db47010`直接main提交并已推送origin/main，package.ps1在该提交的干净工作树生成安装包清单（workingTreeDirty=false）；后续部署记录提交不重新标注构建来源。安装记录见 [交接状态](HANDOFF.md)。
+
+| 安装包 | SHA-256 |
+|---|---|
+| ae2-inventory-dashboard-0.1.5-dev-server.jar | b0f97edaae283370ddb5b3200dc688899ef67a60a368a1205f875fb38a3d9a60 |
+| ae2-dashboard-assets-0.1.5-dev-client-only.jar | 011b93e9865b88ee70870379bde155776613a64d44000c8a808f2ebf88168fea |
+
+2026-10-23 12:29（UTC+8）服务端暂存校验、备份旧包和配置、切换JAR及排除配置均完成；目标文件再次校验一致。脚本/units权限0644，私有env0600，systemd校验退出0。只执行daemon-reload，没有启动备份：service未有运行时间，timer disabled/inactive；原游戏进程保持未重启。数据库、WAL/SHM、Dashboard配置、显示包均未修改。
 
 生产部署只上传/替换已验证JAR、修正SimpleBackups排除、安装备份脚本和systemd模板；不重启游戏、不运行首次在线备份、不启用timer。重启后应核查实际版本、采样/丢样、维护耗时、SimpleBackups排除和完成副本，首次备份成功再启用每小时timer。上传不代表运行验收通过。
 
