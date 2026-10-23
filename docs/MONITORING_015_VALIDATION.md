@@ -1,12 +1,12 @@
 # 0.1.5 监测修复验证
 
-日期：2026-10-23。基于已有0.1.4提交9b42499，用户批准 [实施约定](MONITORING_015_PLAN.md)。本文件记录实际执行的检查；生产新版本验收仍等待用户手动重启。
+日期：2026-10-23。基于已有0.1.4提交9b42499，用户批准 [实施约定](MONITORING_015_PLAN.md)。本文件记录实际执行的检查；用户已手动重启，生产运行核查、首次一致性备份和timer启用完成，生产世界ZIP/NAS链仍待验收。
 
 ## 调查结论
 
 重启前四个网络采样时刻一致，其中两个一小时359个样本/1段，另外两个295个样本/61段，后者重复出现每分钟缺一个样本。无对应拓扑事件或SQL错误。长tick后 `next=now+interval` 使网络永久同相；全局两个快照许可在单writer维护期间丢弃额外小快照。本地阻塞writer并提交五个小网络，旧代码当前库存五份但仅落库两份、丢样三份。分钟维护的具体最慢SQL尚未测明，未增加猜测索引；新增分阶段DEBUG耗时便于下次定位。
 
-上午09:16:59（UTC+8）原生SIGBUS发生在writer的SQLite step，故障地址是SHM offset0x8000映射首字节；内核无同期OOM记录。生产SimpleBackups在同JVM普通打开/关闭在线库、WAL、SHM，可能释放该进程SQLite锁。随后外部只读SQLite连接可缩短仍被JVM映射的SHM。本轮调查曾执行此类外部读取，可能是触发链最后一步，已告知用户；此后不再打开在线生产库。
+上午09:16:59（UTC+8）原生SIGBUS发生在writer的SQLite step，故障地址是SHM offset0x8000映射首字节；内核无同期OOM记录。生产SimpleBackups在同JVM普通打开/关闭在线库、WAL、SHM，可能释放该进程SQLite锁。随后外部只读SQLite连接可缩短仍被JVM映射的SHM。本轮调查曾执行此类外部读取，可能是触发链最后一步，已告知用户；在排除并重启恢复锁之前停止外部打开在线生产库。
 
 Linux A/B复现使用生产同款Forge JDBC3.36.0.3+20211227、native SQLite3.36.0、Java17.0.20.1。外部SQLite为3.46.1，生产为3.45.1，保留此差异：
 
@@ -54,8 +54,22 @@ Linux A/B复现使用生产同款Forge JDBC3.36.0.3+20211227、native SQLite3.36
 | ae2-inventory-dashboard-0.1.5-dev-server.jar | b0f97edaae283370ddb5b3200dc688899ef67a60a368a1205f875fb38a3d9a60 |
 | ae2-dashboard-assets-0.1.5-dev-client-only.jar | 011b93e9865b88ee70870379bde155776613a64d44000c8a808f2ebf88168fea |
 
-2026-10-23 12:29（UTC+8）服务端暂存校验、备份旧包和配置、切换JAR及排除配置均完成；目标文件再次校验一致。脚本/units权限0644，私有env0600，systemd校验退出0。只执行daemon-reload，没有启动备份：service未有运行时间，timer disabled/inactive；原游戏进程保持未重启。数据库、WAL/SHM、Dashboard配置、显示包均未修改。
+2026-10-23 12:29（UTC+8）服务端暂存校验、备份旧包和配置、切换JAR及排除配置均完成；目标文件再次校验一致。脚本/units权限0644，私有env0600，systemd校验退出0。当时只执行daemon-reload，没有启动备份：service未有运行时间，timer disabled/inactive；原游戏进程保持未重启。部署时未修改数据库、WAL/SHM、Dashboard配置或显示包。
 
-生产部署只上传/替换已验证JAR、修正SimpleBackups排除、安装备份脚本和systemd模板；不重启游戏、不运行首次在线备份、不启用timer。重启后应核查实际版本、采样/丢样、维护耗时、SimpleBackups排除和完成副本，首次备份成功再启用每小时timer。上传不代表运行验收通过。
+## 用户重启后的生产核查
+
+以下时间均为2026-10-23 UTC+8，核查截至13:15。由用户重启游戏，随后按已批准顺序完成首次备份和timer启用；本次没有再次重启。
+
+| 检查 | 实际结果 |
+|---|---|
+| 新进程与版本 | 13:01:08启动，13:01:11日志确认有效Mod版本0.1.5-dev，13:01:49 Done，13:01:59 Dashboard开始记录；备份后仍为同一进程，无新hs_err |
+| 认证状态接口 | historyStatus=recording、httpStatus=listening、droppedSamples=0、snapshotCacheEvictions=0、sampleIntervalSeconds=10、craftingStatus=ready；核查临时会话随后注销成功，不保存凭据 |
+| DEBUG运行证据 | 13轮维护、395次采样均published=true，无Dashboard WARN/ERROR或丢样日志；最近七轮维护11～21ms，累计appendFailures/readFailures/readerBusy/readCancelled均0，最新checkpoint busy=0 |
+| 完成副本中的采样连续性 | 只读immutable打开独立完成副本，13:02～13:07五网各35样本/1段，共175样本，间隔9963～10046ms，无超过15秒的缺口；不以快照中有限时间窗推断后续全部历史 |
+| 排除配置 | 重启后在线ae2-dashboard、暂存目录及嵌套文件的目录前缀正则仍正确；完成副本目录不在排除范围 |
+| 首次一致性备份 | 13:07:40开始，13:07:55成功；Result=success、ExecMainStatus=0，1812156416字节，耗时15030ms；脚本发布前quick_check通过，完成目录仅history.sqlite，无WAL/SHM |
+| 每小时timer | 13:15执行enable --now，enabled/active/waiting；当时NextElapse为14:00:55，按hourly及最多120秒随机偏移运行；首次定时触发尚未发生 |
+
+本次核查时最新已完成世界ZIP仍为10月23日01:47（重启前），未强制生成生产世界备份。待下一份正常世界ZIP完成后，核对在线/暂存目录均排除、完成副本包含在内，并隔离提取quick_check及核对NAS接收。生产ZIP恢复和NAS端到端验收尚未完成；本地真实SimpleBackups验证不能替代这一项。
 
 仍未证明最初哪次长tick造成同步，也未完成生产大型网络的新版本负载验收。当前修复保证有界缓冲及真实缺口语义，不承诺任意持续写入负载下永不丢样；其他模组与客户端GPU组合仍属于既有未完成边界。
